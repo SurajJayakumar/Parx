@@ -1,23 +1,64 @@
+const liveMetrics = [
+  {
+    label: "Walking Speed",
+    unit: "m/s",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5" aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.5l7.5-7.5 6 6L21 6" />
+      </svg>
+    ),
+  },
+  {
+    label: "Step Cadence",
+    unit: "steps/min",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5" aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+    ),
+  },
+  {
+    label: "Arm Swing (L)",
+    unit: "°",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5" aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15.042 21.672L13.684 16.6m0 0l-2.51 2.225.569-9.47 5.227 7.917-3.286-.672zM12 2.25V4.5m5.834.166l-1.591 1.591M20.25 10.5H18M7.757 14.743l-1.59 1.59M6 10.5H3.75m4.007-4.243l-1.59-1.59" />
+      </svg>
+    ),
+  },
+  {
+    label: "Arm Swing (R)",
+    unit: "°",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5" aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 15l4.875-4.875L18 15M6 20.25h12A2.25 2.25 0 0020.25 18V6A2.25 2.25 0 0018 3.75H6A2.25 2.25 0 003.75 6v12A2.25 2.25 0 006 20.25z" />
+      </svg>
+    ),
+  },
+];
+
 export default function CameraPage() {
   return (
     <>
-      <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-50 mb-2">
-        Camera Assessment
+      <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-50 mb-1">
+        Live Camera
       </h1>
-      <p className="text-zinc-500 dark:text-zinc-400 mb-8">
-        Use your camera to record movement for tremor and motor analysis.
+      <p className="text-zinc-500 dark:text-zinc-400 mb-8 text-sm">
+        Real-time movement capture for motor analysis.
       </p>
 
-      <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden">
+      {/* Camera preview placeholder */}
+      <div className="mx-auto w-full max-w-2xl rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden mb-8">
         <div className="flex aspect-video items-center justify-center bg-zinc-100 dark:bg-zinc-800">
           <div className="text-center">
             <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-zinc-200 dark:bg-zinc-700">
               <svg
-                className="h-8 w-8 text-zinc-500 dark:text-zinc-400"
+                className="h-8 w-8 text-zinc-400 dark:text-zinc-500"
                 fill="none"
                 viewBox="0 0 24 24"
                 stroke="currentColor"
                 strokeWidth={1.5}
+                aria-hidden="true"
               >
                 <path
                   strokeLinecap="round"
@@ -27,58 +68,43 @@ export default function CameraPage() {
               </svg>
             </div>
             <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">
-              Camera feed will appear here
+              Camera preview will appear here
             </p>
-            <p className="mt-1 text-xs text-zinc-400">Camera access required</p>
+            <p className="mt-1 text-xs text-zinc-400">Webcam not yet connected</p>
           </div>
         </div>
+      </div>
 
-        <div className="p-6">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
-                Recording Controls
-              </h2>
-              <p className="text-xs text-zinc-400 mt-0.5">
-                Position yourself in frame, then start recording.
-              </p>
-            </div>
-            <button
-              disabled
-              className="rounded-full bg-zinc-900 dark:bg-zinc-50 px-6 py-2.5 text-sm font-medium text-white dark:text-zinc-900 opacity-50 cursor-not-allowed"
+      {/* Live Metrics */}
+      <section aria-labelledby="live-metrics-heading" className="mb-8">
+        <h2
+          id="live-metrics-heading"
+          className="text-xs font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 mb-4"
+        >
+          Live Metrics
+        </h2>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {liveMetrics.map(({ label, unit, icon }) => (
+            <div
+              key={label}
+              className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6"
             >
-              Start Recording
-            </button>
-          </div>
+              <div className="flex items-center gap-2 mb-3 text-zinc-400 dark:text-zinc-500">
+                {icon}
+                <span className="text-xs font-medium uppercase tracking-wide">{label}</span>
+              </div>
+              <p className="text-3xl font-semibold text-zinc-300 dark:text-zinc-600 mb-1">—</p>
+              <p className="text-xs text-zinc-400 dark:text-zinc-500">{unit} · awaiting feed</p>
+            </div>
+          ))}
         </div>
-      </div>
+      </section>
 
-      <div className="mt-6 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6">
-        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50 mb-4">
-          Analysis Results
-        </h2>
-        <p className="text-sm text-zinc-400">
-          Results will appear here after a recording is processed.
-        </p>
-      </div>
-
-      <div className="mt-6 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6">
-        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50 mb-3">
-          Instructions
-        </h2>
-        <ol className="space-y-2 text-sm text-zinc-500 dark:text-zinc-400 list-decimal list-inside">
-          <li>Ensure good lighting and a clear background.</li>
-          <li>Position your hands or full body in view as prompted.</li>
-          <li>
-            Press{" "}
-            <span className="font-medium text-zinc-700 dark:text-zinc-300">
-              Start Recording
-            </span>{" "}
-            and follow on-screen cues.
-          </li>
-          <li>Results are analyzed automatically after the session.</li>
-        </ol>
-      </div>
+      {/* Disclaimer */}
+      <p className="text-center text-xs text-zinc-400 dark:text-zinc-500">
+        Screening tool — not a medical diagnosis.
+      </p>
     </>
   );
 }
