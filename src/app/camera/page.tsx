@@ -1,4 +1,5 @@
 import { Card, CardSectionLabel } from "@/components/ui/Card";
+import CameraCapture from "@/components/CameraCapture";
 
 const liveMetrics = [
   {
@@ -50,32 +51,9 @@ export default function CameraPage() {
       </p>
 
       {/* Camera preview */}
-      <Card padding="none" className="mx-auto w-full max-w-2xl overflow-hidden mb-8">
-        <div className="flex aspect-video items-center justify-center bg-zinc-100 dark:bg-zinc-800">
-          <div className="text-center">
-            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-zinc-200 dark:bg-zinc-700">
-              <svg
-                className="h-8 w-8 text-zinc-400 dark:text-zinc-500"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.5}
-                aria-hidden="true"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9A2.25 2.25 0 0013.5 5.25h-9A2.25 2.25 0 002.25 7.5v9A2.25 2.25 0 004.5 18.75z"
-                />
-              </svg>
-            </div>
-            <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">
-              Camera preview will appear here
-            </p>
-            <p className="mt-1 text-xs text-zinc-400">Webcam not yet connected</p>
-          </div>
-        </div>
-      </Card>
+      <div className="mx-auto w-full max-w-2xl mb-8">
+        <CameraCapture />
+      </div>
 
       {/* Live Metrics */}
       <section aria-labelledby="live-metrics-heading" className="mb-8">
