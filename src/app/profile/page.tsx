@@ -1,13 +1,21 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import AuthGate from "@/components/AuthGate";
 import { Card, CardSectionLabel } from "@/components/ui/Card";
+import { useAuth } from "@/lib/useAuth";
+import { signOutUser } from "@/lib/firebaseAuth";
 
 export default function ProfilePage() {
+  const { user } = useAuth();
+  const router = useRouter();
+
   const [patientName, setPatientName] = useState("");
   const [caregiverEmail, setCaregiverEmail] = useState("");
   const [emailNotifications, setEmailNotifications] = useState(false);
   const [toast, setToast] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -20,14 +28,41 @@ export default function ProfilePage() {
     return () => clearTimeout(id);
   }, [toast]);
 
+  async function handleSignOut() {
+    setSigningOut(true);
+    try {
+      await signOutUser();
+      router.replace("/login");
+    } finally {
+      setSigningOut(false);
+    }
+  }
+
   return (
-    <>
+    <AuthGate>
       <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-50 mb-1">
         Profile
       </h1>
       <p className="text-zinc-500 dark:text-zinc-400 mb-8 text-sm">
         Manage your patient&apos;s information and notification preferences.
       </p>
+
+      {/* Account info */}
+      <section className="mb-4">
+        <CardSectionLabel>Account</CardSectionLabel>
+        <Card>
+          <div className="space-y-3">
+            <div>
+              <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-0.5">Email</p>
+              <p className="text-sm text-zinc-900 dark:text-zinc-50">{user?.email ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-0.5">User ID</p>
+              <p className="text-sm font-mono text-zinc-500 dark:text-zinc-400 break-all">{user?.uid ?? "—"}</p>
+            </div>
+          </div>
+        </Card>
+      </section>
 
       <form onSubmit={handleSave} noValidate>
         {/* Patient */}
@@ -108,7 +143,23 @@ export default function ProfilePage() {
           </Card>
         </section>
 
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={handleSignOut}
+            disabled={signingOut}
+            className="flex items-center gap-2 rounded-full border border-red-200 dark:border-red-800 px-5 py-2.5 text-sm font-medium text-red-600 dark:text-red-400 transition-colors hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2"
+          >
+            {signingOut ? (
+              <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            ) : (
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
+              </svg>
+            )}
+            {signingOut ? "Signing out…" : "Sign out"}
+          </button>
+
           <button
             type="submit"
             className="rounded-full bg-zinc-900 dark:bg-zinc-50 px-6 py-2.5 text-sm font-medium text-white dark:text-zinc-900 transition-opacity hover:opacity-80 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-50 focus:ring-offset-2"
@@ -142,6 +193,6 @@ export default function ProfilePage() {
           Saved locally (temporary)
         </div>
       </div>
-    </>
+    </AuthGate>
   );
 }

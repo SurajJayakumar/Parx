@@ -1,3 +1,4 @@
+import AuthGate from "@/components/AuthGate";
 import EmptyState from "@/components/EmptyState";
 import { Card, CardSectionLabel } from "@/components/ui/Card";
 
@@ -30,7 +31,7 @@ const mobilityMetrics = [
 
 export default function DashboardPage() {
   return (
-    <>
+    <AuthGate>
       <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-50 mb-1">
         Mobility Dashboard
       </h1>
@@ -71,6 +72,6 @@ export default function DashboardPage() {
           />
         </Card>
       </section>
-    </>
+    </AuthGate>
   );
 }
