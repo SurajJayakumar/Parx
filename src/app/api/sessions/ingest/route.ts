@@ -12,6 +12,7 @@ import { logAlertBestEffort } from "@/lib/alerts/logAlert";
 import { computeSeverity } from "@/lib/severity/severityScore";
 import { highRiskAlertTemplate } from "@/lib/email/templates";
 import { sendEmail } from "@/lib/email/sendEmail";
+import { logNotification } from "@/lib/notifications/log";
 
 // ---------------------------------------------------------------------------
 // Request schema
@@ -162,6 +163,7 @@ export async function POST(req: NextRequest) {
   }
 
   // 7. Build + send alert email
+  let emailSubject = "";
   try {
     const { subject, html } = highRiskAlertTemplate({
       userName: patientName,
@@ -174,6 +176,7 @@ export async function POST(req: NextRequest) {
       severityScore,
       severityLabel,
     });
+    emailSubject = subject;
 
     await sendEmail({ to: caregiverEmail, subject, html });
 
@@ -182,10 +185,39 @@ export async function POST(req: NextRequest) {
     if (canBypassNormalThrottle) {
       markSent(urgentThrottleKey);
     }
+
+    if (uid) {
+      logNotification({
+        uid,
+        type: "email",
+        sentTo: caregiverEmail,
+        subject,
+        status: "sent",
+        severityScore,
+      });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (uid) {
+      logNotification({
+        uid,
+        type: "email",
+        sentTo: caregiverEmail,
+        subject: emailSubject,
+        status: "failed",
+        severityScore,
+        meta: { error: msg },
+      });
+    }
     return fail(`Alert email could not be sent: ${msg}`, 502);
   }
 
-  return ok({ sent: true, urgent: isUrgent, ...base });
+  return ok({
+    sent: true,
+    urgent: isUrgent,
+    type: "high_risk",
+    subject: emailSubject,
+    sentTo: caregiverEmail,
+    ...base,
+  });
 }

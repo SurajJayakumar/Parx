@@ -3,14 +3,13 @@ import { z } from "zod";
 
 import { reportReadyTemplate } from "@/lib/email/templates";
 import { sendEmail } from "@/lib/email/sendEmail";
-
-// ---------------------------------------------------------------------------
-// Request schema
-// ---------------------------------------------------------------------------
+import { logNotification } from "@/lib/notifications/log";
 
 const SeveritySchema = z.enum(["low", "medium", "high"]);
 
 const NotifySchema = z.object({
+  /** Firebase Auth uid of the patient. Used to log the notification to Firestore. */
+  uid: z.string().min(1).optional(),
   caregiverEmail: z.string().email(),
   patientName: z.string().min(1),
   /** ISO 8601 date string or any human-readable date label, e.g. "2026-02-21" */
@@ -24,10 +23,6 @@ const NotifySchema = z.object({
 });
 
 type NotifyInput = z.infer<typeof NotifySchema>;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function fail(error: string, status = 400) {
   return NextResponse.json({ ok: false, error }, { status });
@@ -62,12 +57,7 @@ function formatReportPeriod(reportDate: string): string {
   return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/reports/notify
-// ---------------------------------------------------------------------------
-
 export async function POST(req: NextRequest) {
-  // 1. Parse + validate
   let input: NotifyInput;
   try {
     const body = await req.json();
@@ -83,6 +73,7 @@ export async function POST(req: NextRequest) {
   }
 
   const {
+    uid,
     caregiverEmail,
     patientName,
     reportDate,
@@ -93,7 +84,6 @@ export async function POST(req: NextRequest) {
     pdfBase64,
   } = input;
 
-  // 2. Build email content
   const { subject, html } = reportReadyTemplate({
     userName: patientName,
     reportPeriod: formatReportPeriod(reportDate),
@@ -102,7 +92,6 @@ export async function POST(req: NextRequest) {
     reportUrl,
   });
 
-  // 3. Send — attach PDF when provided
   try {
     await sendEmail({
       to: caregiverEmail,
@@ -112,10 +101,37 @@ export async function POST(req: NextRequest) {
         ? [{ filename: "report.pdf", content: pdfBase64 }]
         : undefined,
     });
+
+    if (uid) {
+      logNotification({
+        uid,
+        type: "email",
+        sentTo: caregiverEmail,
+        subject,
+        status: "sent",
+      });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (uid) {
+      logNotification({
+        uid,
+        type: "email",
+        sentTo: caregiverEmail,
+        subject,
+        status: "failed",
+        meta: { error: msg },
+      });
+    }
     return NextResponse.json({ ok: false, error: `Email could not be sent: ${msg}` }, { status: 502 });
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    type: "report_ready",
+    subject,
+    sentTo: caregiverEmail,
+    severityScore: riskScore,
+    severityLabel: severity,
+  });
 }

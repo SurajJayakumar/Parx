@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { Bell } from "lucide-react";
 import { useAuth } from "@/lib/useAuth";
 import { signOutUser } from "@/lib/firebaseAuth";
 
@@ -81,6 +82,22 @@ export default function TopBar() {
                 Sign up
               </Link>
             </>
+          )}
+
+          {/* Notifications bell — only when signed in */}
+          {!loading && user && (
+            <Link
+              href="/notifications"
+              aria-label="Notifications"
+              className={[
+                "flex h-10 w-10 items-center justify-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-50",
+                pathname === "/notifications"
+                  ? "bg-zinc-900 dark:bg-zinc-50 text-white dark:text-zinc-900"
+                  : "text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-50",
+              ].join(" ")}
+            >
+              <Bell className="h-5 w-5" strokeWidth={1.75} />
+            </Link>
           )}
 
           {/* Profile dropdown — only when signed in */}
