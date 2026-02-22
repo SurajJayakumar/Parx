@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Parkinson Frontend Demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+    video, canvas { width: 480px; max-width: 100%; border: 1px solid #ddd; border-radius: 8px; }
+    button { padding: 8px 12px; margin-right: 8px; }
+    pre { background: #111; color: #0f0; padding: 12px; border-radius: 8px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h2>Parkinson Inference Demo (MediaPipe in Browser)</h2>
+  <p>Flow: camera frame -> MediaPipe Holistic -> feature vector (124) -> rolling window -> /predict/features</p>
+
+  <div>
+    <button id="startBtn">Start Camera</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div class="row" style="margin-top:12px;">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <pre id="log"></pre>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js"></script>
+
+  <script>
+    const API_URL = "http://127.0.0.1:8000/predict/features";
+    const SEQ_LEN = 100;
+    const FEATURE_DIM = 124;
+    const INFER_EVERY_N_FRAMES = 6;
+
+    const videoEl = document.getElementById("video");
+    const canvasEl = document.getElementById("canvas");
+    const canvasCtx = canvasEl.getContext("2d");
+    const logEl = document.getElementById("log");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+
+    let camera = null;
+    let holistic = null;
+    let running = false;
+    let frameCount = 0;
+    const featureBuffer = [];
+
+    const IDX = {
+      LH_IP: 23,
+      RH_IP: 24,
+      LS: 11,
+      RS: 12,
+      L_SHOULDER: 11,
+      R_SHOULDER: 12,
+      L_ELBOW: 13,
+      R_ELBOW: 14,
+      L_WRIST: 15,
+      R_WRIST: 16,
+      L_HIP: 23,
+      R_HIP: 24,
+      L_KNEE: 25,
+      R_KNEE: 26,
+      L_ANKLE: 27,
+      R_ANKLE: 28
+    };
+
+    function log(msg, obj) {
+      logEl.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + (obj ? JSON.stringify(obj, null, 2) : "") + "\n\n" + logEl.textContent;
+    }
+
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+    function vecSub(a, b) { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+    function vecNorm(v) { return Math.hypot(v[0], v[1], v[2]); }
+    function vecDot(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+
+    function angle(a, b, c) {
+      const ba = vecSub(a, b);
+      const bc = vecSub(c, b);
+      const cos = vecDot(ba, bc) / (vecNorm(ba) * vecNorm(bc) + 1e-8);
+      return Math.acos(clamp(cos, -1.0, 1.0));
+    }
+
+    function zeroPose() {
+      return Array.from({ length: 33 }, () => [0, 0, 0, 0]);
+    }
+
+    function landmarksToArray(landmarks) {
+      if (!landmarks || landmarks.length !== 33) return zeroPose();
+      return landmarks.map(lm => [lm.x ?? 0, lm.y ?? 0, lm.z ?? 0, lm.visibility ?? 1.0]);
+    }
+
+    function normalizePose(poseXYZV) {
+      const lh = poseXYZV[IDX.LH_IP].slice(0, 3);
+      const rh = poseXYZV[IDX.RH_IP].slice(0, 3);
+      const hipCenter = [(lh[0]+rh[0])/2, (lh[1]+rh[1])/2, (lh[2]+rh[2])/2];
+
+      const ls = poseXYZV[IDX.LS].slice(0, 3);
+      const rs = poseXYZV[IDX.RS].slice(0, 3);
+      const shoulders = [(ls[0]+rs[0])/2, (ls[1]+rs[1])/2, (ls[2]+rs[2])/2];
+      const torsoLen = vecNorm(vecSub(shoulders, hipCenter)) + 1e-6;
+
+      return poseXYZV.map(p => {
+        const coords = [
+          (p[0] - hipCenter[0]) / torsoLen,
+          (p[1] - hipCenter[1]) / torsoLen,
+          (p[2] - hipCenter[2]) / torsoLen
+        ];
+        return [coords[0], coords[1], coords[2], p[3]];
+      });
+    }
+
+    function computeAngles(poseNorm) {
+      const p = poseNorm.map(v => v.slice(0, 3));
+      const shoulderElbowWristL = angle(p[IDX.L_SHOULDER], p[IDX.L_ELBOW], p[IDX.L_WRIST]);
+      const shoulderElbowWristR = angle(p[IDX.R_SHOULDER], p[IDX.R_ELBOW], p[IDX.R_WRIST]);
+      const hipKneeAnkleL = angle(p[IDX.L_HIP], p[IDX.L_KNEE], p[IDX.L_ANKLE]);
+      const hipKneeAnkleR = angle(p[IDX.R_HIP], p[IDX.R_KNEE], p[IDX.R_ANKLE]);
+      const shoulderVec = [
+        p[IDX.R_SHOULDER][0] - p[IDX.L_SHOULDER][0],
+        p[IDX.R_SHOULDER][1] - p[IDX.L_SHOULDER][1]
+      ];
+      const torsoYawProxy = Math.atan2(shoulderVec[1], shoulderVec[0]);
+      return [shoulderElbowWristL, shoulderElbowWristR, hipKneeAnkleL, hipKneeAnkleR, torsoYawProxy];
+    }
+
+    function handFeatures(handLandmarks) {
+      if (!handLandmarks || handLandmarks.length !== 21) return Array(10).fill(0);
+      const arr = handLandmarks.map(lm => [lm.x ?? 0, lm.y ?? 0, lm.z ?? 0]);
+      const thumbTip = arr[4];
+      const indexTip = arr[8];
+      const dist = vecNorm(vecSub(thumbTip, indexTip));
+
+      const tips = [arr[4], arr[8], arr[12], arr[16], arr[20]];
+      const means = [0, 1, 2].map(k => tips.reduce((s, t) => s + t[k], 0) / tips.length);
+      const spread = [0, 1, 2].map(k => {
+        const m = means[k];
+        return Math.sqrt(tips.reduce((s, t) => s + (t[k]-m)*(t[k]-m), 0) / tips.length);
+      }).reduce((a, b) => a + b, 0) / 3;
+
+      const xs = arr.map(v => v[0]);
+      const ys = arr.map(v => v[1]);
+      const velocityPlaceholder = 0;
+
+      return [
+        dist,
+        spread,
+        velocityPlaceholder,
+        xs.reduce((a, b) => a + b, 0) / xs.length,
+        ys.reduce((a, b) => a + b, 0) / ys.length,
+        Math.min(...xs), Math.max(...xs),
+        Math.min(...ys), Math.max(...ys),
+        arr[8][2]
+      ];
+    }
+
+    function frameToFeature(results) {
+      const pose = landmarksToArray(results.poseLandmarks);
+      const poseNorm = normalizePose(pose);
+
+      const coords2d = poseNorm.flatMap(v => [v[0], v[1]]); // 66
+      const angles = computeAngles(poseNorm); // 5
+      const lh = handFeatures(results.leftHandLandmarks); // 10
+      const rh = handFeatures(results.rightHandLandmarks); // 10
+      const vis = poseNorm.map(v => v[3]); // 33
+
+      const feat = [...coords2d, ...angles, ...lh, ...rh, ...vis];
+      if (feat.length !== FEATURE_DIM) {
+        throw new Error(`Feature length mismatch: got ${feat.length}, expected ${FEATURE_DIM}`);
+      }
+      return feat.map(v => Number.isFinite(v) ? v : 0);
+    }
+
+    function pushFeature(feat) {
+      featureBuffer.push(feat);
+      if (featureBuffer.length > SEQ_LEN) {
+        featureBuffer.splice(0, featureBuffer.length - SEQ_LEN);
+      }
+    }
+
+    function getFixedWindow() {
+      if (featureBuffer.length === 0) return null;
+      if (featureBuffer.length >= SEQ_LEN) return featureBuffer.slice(-SEQ_LEN);
+      const first = featureBuffer[0];
+      const padCount = SEQ_LEN - featureBuffer.length;
+      const pads = Array.from({ length: padCount }, () => [...first]);
+      return [...pads, ...featureBuffer];
+    }
+
+    async function infer() {
+      const window = getFixedWindow();
+      if (!window) return;
+
+      const payload = { features: window, seq_len: SEQ_LEN };
+      const resp = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`API ${resp.status}: ${text}`);
+      }
+
+      const out = await resp.json();
+      log("Inference", out);
+    }
+
+    async function onResults(results) {
+      if (!running) return;
+
+      canvasEl.width = videoEl.videoWidth;
+      canvasEl.height = videoEl.videoHeight;
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+      canvasCtx.drawImage(results.image, 0, 0, canvasEl.width, canvasEl.height);
+      canvasCtx.restore();
+
+      try {
+        const feat = frameToFeature(results);
+        pushFeature(feat);
+      } catch (err) {
+        log("Feature error", { error: String(err) });
+        return;
+      }
+
+      frameCount += 1;
+      if (featureBuffer.length >= 30 && frameCount % INFER_EVERY_N_FRAMES === 0) {
+        try {
+          await infer();
+        } catch (err) {
+          log("Inference error", { error: String(err) });
+        }
+      }
+    }
+
+    async function start() {
+      if (running) return;
+
+      holistic = new Holistic({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
+      });
+      holistic.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+      holistic.onResults(onResults);
+
+      camera = new Camera(videoEl, {
+        onFrame: async () => {
+          if (holistic) await holistic.send({ image: videoEl });
+        },
+        width: 640,
+        height: 480
+      });
+
+      await camera.start();
+      running = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      log("Camera started");
+    }
+
+    async function stop() {
+      running = false;
+      if (camera && camera.video && camera.video.srcObject) {
+        for (const track of camera.video.srcObject.getTracks()) track.stop();
+      }
+      if (holistic && holistic.close) await holistic.close();
+      camera = null;
+      holistic = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      log("Camera stopped");
+    }
+
+    startBtn.addEventListener("click", () => start().catch(e => log("Start error", { error: String(e) })));
+    stopBtn.addEventListener("click", () => stop().catch(e => log("Stop error", { error: String(e) })));
+  </script>
+</body>
+</html>

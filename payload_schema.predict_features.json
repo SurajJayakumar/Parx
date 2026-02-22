@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://parkinson.ai/schemas/predict-features.json",
+  "title": "PredictFeaturesRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["features"],
+  "properties": {
+    "features": {
+      "description": "MediaPipe feature sequence with shape T x 124",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "array",
+        "minItems": 124,
+        "maxItems": 124,
+        "items": {
+          "type": "number"
+        }
+      }
+    },
+    "seq_len": {
+      "description": "Server-side fixed sequence length for pad/crop",
+      "type": "integer",
+      "minimum": 16,
+      "maximum": 300,
+      "default": 100
+    }
+  }
+}

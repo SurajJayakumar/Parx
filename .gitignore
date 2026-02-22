@@ -42,3 +42,9 @@ next-env.d.ts
 
 # Testing
 coverage/
+
+Backend/venv/
+node_modules/
+dist/
+*.log
+*.env
