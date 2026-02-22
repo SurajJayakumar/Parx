@@ -29,7 +29,7 @@ function layout(accentColor: string, body: string): string {
           <tr>
             <td style="background:${accentColor};padding:24px 32px;">
               <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.3px;">
-                Parkinson AI
+                Parxx
               </span>
             </td>
           </tr>
@@ -48,7 +48,7 @@ function layout(accentColor: string, body: string): string {
                 ${DISCLAIMER}
               </p>
               <p style="margin:8px 0 0;font-size:12px;color:${MUTED};">
-                You received this email because you have alerts enabled on your Parkinson AI account.
+                You received this email because you have alerts enabled on your Parxx account.
               </p>
             </td>
           </tr>
@@ -174,7 +174,7 @@ export function highRiskAlertTemplate(input: HighRiskAlertInput): EmailTemplate 
       Attention Required
     </h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
-      Hi ${userName}, Parkinson AI detected notable patterns during your recent activity
+      Hi ${userName}, Parxx detected notable patterns during your recent activity
       that may warrant your attention or a conversation with your care team.
     </p>
 
@@ -204,7 +204,7 @@ export function highRiskAlertTemplate(input: HighRiskAlertInput): EmailTemplate 
   `;
 
   return {
-    subject: `[Parkinson AI] Attention Required — Patterns Detected in Your Recent Session`,
+    subject: `[Parxx] Attention Required — Patterns Detected in Your Recent Session`,
     html: layout(WARN_COLOR, body),
   };
 }
@@ -220,7 +220,7 @@ export function reportReadyTemplate(input: ReportReadyInput): EmailTemplate {
       Your Report Is Ready
     </h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
-      Hi ${userName}, your Parkinson AI report for <strong>${reportPeriod}</strong>
+      Hi ${userName}, your Parxx report for <strong>${reportPeriod}</strong>
       has been generated and is ready to review.
     </p>
 
@@ -235,7 +235,7 @@ export function reportReadyTemplate(input: ReportReadyInput): EmailTemplate {
   `;
 
   return {
-    subject: `[Parkinson AI] Your Report for ${reportPeriod} Is Ready`,
+    subject: `[Parxx] Your Report for ${reportPeriod} Is Ready`,
     html: layout(BRAND_COLOR, body),
   };
 }
@@ -269,7 +269,7 @@ export function weeklySummaryTemplate(input: WeeklySummaryInput): EmailTemplate 
       Weekly Summary — ${weekLabel}
     </h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
-      Hi ${userName}, here is your Parkinson AI summary for the week of
+      Hi ${userName}, here is your Parxx summary for the week of
       <strong>${weekLabel}</strong>. You completed
       <strong>${sessionsCompleted} ${sessionWord}</strong> this week.
     </p>
@@ -286,7 +286,7 @@ export function weeklySummaryTemplate(input: WeeklySummaryInput): EmailTemplate 
   `;
 
   return {
-    subject: `[Parkinson AI] Your Weekly Summary — ${weekLabel}`,
+    subject: `[Parxx] Your Weekly Summary — ${weekLabel}`,
     html: layout(BRAND_COLOR, body),
   };
 }

@@ -55,7 +55,7 @@ export default function TopBar() {
             </svg>
           </span>
           <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-50 tracking-tight">
-            ParkinsonAI
+            Parxx
           </span>
         </Link>
 

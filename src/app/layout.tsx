@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Parkinson AI",
+  title: "Parxx",
   description: "AI-powered Parkinson's disease monitoring and assistance",
 };
 

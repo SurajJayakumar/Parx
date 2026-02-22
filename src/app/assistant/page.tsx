@@ -279,7 +279,7 @@ export default function AssistantPage() {
 
           {/* Title */}
           <h1 className="text-4xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50 text-center">
-            Parkinson Voice Assistant
+            Parxx Voice Assistant
           </h1>
 
           {/* Center section */}
