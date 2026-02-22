@@ -12,6 +12,13 @@
 
 export const HIGH_RISK_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+/**
+ * Reduced cooldown for urgent (severityScore ≥ 9) events.
+ * Allows one alert per 30 minutes even when the normal 6-hour throttle
+ * would otherwise suppress it.
+ */
+export const URGENT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
+
 // Map<throttleKey, lastSentTimestamp>
 const sentAt = new Map<string, number>();
 

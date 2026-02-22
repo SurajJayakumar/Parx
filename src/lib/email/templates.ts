@@ -100,12 +100,21 @@ export interface HighRiskAlertInput {
   detectedAt: string;
   /** Short human-readable description of the session or activity assessed */
   sessionDescription: string;
-  /** Specific observations that raised the alert (2-5 items) */
+  /** Specific observations that raised the alert — top 2–4 shown in email */
   observations: string[];
   /** Full URL to the user's dashboard */
   dashboardUrl: string;
   /** Full URL to the specific report, if available */
   reportUrl?: string;
+  /**
+   * When true, renders an "URGENT" banner and a stronger CTA.
+   * Set for severityScore ≥ 8 (fall / critical freezing events).
+   */
+  urgent?: boolean;
+  /** Numeric severity score (0–10) from computeSeverity(). Displayed in the email. */
+  severityScore?: number;
+  /** Event label from computeSeverity() — drives the "Event" row in the email. */
+  severityLabel?: "normal" | "parkinson_walk" | "freezing" | "fall";
 }
 
 export interface ReportReadyInput {
@@ -151,6 +160,32 @@ export interface EmailTemplate {
 // Exported templates
 // ---------------------------------------------------------------------------
 
+// Maps a SeverityLabel to a human-readable event description for the email.
+const SEVERITY_LABEL_TEXT: Record<string, string> = {
+  fall: "Fall detected",
+  freezing: "Freezing episode",
+  parkinson_walk: "Parkinson-like gait pattern",
+  normal: "Elevated movement irregularity",
+};
+
+// Colour for each score segment in the visual severity bar (filled / unfilled).
+const SCORE_BAR_FILLED = "#dc2626";   // red-600
+const SCORE_BAR_UNFILLED = "#fee2e2"; // red-100
+
+/** Renders a 10-pip visual severity bar (filled pips = score). */
+function severityBar(score: number): string {
+  const pips = Array.from({ length: 10 }, (_, i) => {
+    const filled = i < score;
+    return `<td style="width:10%;padding:0 2px;">
+      <div style="height:8px;border-radius:4px;background:${filled ? SCORE_BAR_FILLED : SCORE_BAR_UNFILLED};"></div>
+    </td>`;
+  }).join("");
+
+  return `<table cellpadding="0" cellspacing="0" style="width:100%;margin:8px 0 4px;">
+    <tr>${pips}</tr>
+  </table>`;
+}
+
 /**
  * Sent immediately when the AI detects patterns that warrant a high-priority alert.
  */
@@ -162,6 +197,9 @@ export function highRiskAlertTemplate(input: HighRiskAlertInput): EmailTemplate 
     observations,
     dashboardUrl,
     reportUrl,
+    urgent = false,
+    severityScore,
+    severityLabel,
   } = input;
 
   const formattedDate = new Date(detectedAt).toLocaleString("en-US", {
@@ -169,14 +207,73 @@ export function highRiskAlertTemplate(input: HighRiskAlertInput): EmailTemplate 
     timeStyle: "short",
   });
 
+  // --- Urgent banner ---
+  const urgentBanner = urgent
+    ? `<div style="background:#7f1d1d;color:#fef2f2;padding:10px 16px;border-radius:6px;
+                  margin-bottom:20px;font-size:14px;font-weight:700;letter-spacing:0.05em;
+                  text-transform:uppercase;">
+         &#9888; Urgent — Immediate attention may be required. Please check on the patient.
+       </div>`
+    : "";
+
+  const headline = urgent ? "Urgent — Immediate Attention Required" : "Attention Required";
+
+  // --- Severity score section ---
+  const scoreSection =
+    severityScore !== undefined
+      ? `<p style="margin:16px 0 4px;font-size:13px;font-weight:600;color:${MUTED};text-transform:uppercase;letter-spacing:0.05em;">
+           Severity score
+         </p>
+         ${severityBar(severityScore)}
+         <p style="margin:2px 0 16px;font-size:15px;font-weight:700;color:${WARN_COLOR};">
+           ${severityScore} / 10
+         </p>`
+      : "";
+
+  // --- Event type section ---
+  const eventText =
+    severityLabel && severityLabel !== "normal"
+      ? SEVERITY_LABEL_TEXT[severityLabel] ?? SEVERITY_LABEL_TEXT.normal
+      : null;
+
+  const eventSection = eventText
+    ? `<p style="margin:0 0 4px;font-size:13px;font-weight:600;color:${MUTED};text-transform:uppercase;letter-spacing:0.05em;">
+         Event
+       </p>
+       <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${eventText}</p>`
+    : "";
+
+  // --- Observations: show top 2–4 ---
+  const topObservations = observations.slice(0, 4);
+
+  // --- Call to action ---
+  const ctaSection = urgent
+    ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px 20px;margin:24px 0;">
+         <p style="margin:0 0 8px;font-size:15px;font-weight:700;color:#7f1d1d;">
+           Please act now
+         </p>
+         <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#374151;">
+           A high-severity event was detected. Check on the patient immediately and
+           contact your care team if needed.
+         </p>
+         ${ctaButton("View Dashboard Now", dashboardUrl, "#7f1d1d")}
+         ${reportUrl ? `<br/>${ctaButton("View Full Report", reportUrl, BRAND_COLOR)}` : ""}
+       </div>`
+    : `${ctaButton("View Dashboard", dashboardUrl, WARN_COLOR)}
+       ${reportUrl ? `<br/>${ctaButton("View Full Report", reportUrl, BRAND_COLOR)}` : ""}`;
+
   const body = `
+    ${urgentBanner}
     <h1 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${WARN_COLOR};">
-      Attention Required
+      ${headline}
     </h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
       Hi ${userName}, Parxx detected notable patterns during your recent activity
       that may warrant your attention or a conversation with your care team.
     </p>
+
+    ${scoreSection}
+    ${eventSection}
 
     <p style="margin:0 0 4px;font-size:13px;font-weight:600;color:${MUTED};text-transform:uppercase;letter-spacing:0.05em;">
       Session
@@ -189,12 +286,11 @@ export function highRiskAlertTemplate(input: HighRiskAlertInput): EmailTemplate 
     <p style="margin:0 0 16px;font-size:15px;color:#111827;">${formattedDate}</p>
 
     <p style="margin:0 0 4px;font-size:13px;font-weight:600;color:${MUTED};text-transform:uppercase;letter-spacing:0.05em;">
-      Changes observed
+      Key observations
     </p>
-    ${bulletList(observations)}
+    ${bulletList(topObservations)}
 
-    ${ctaButton("View Dashboard", dashboardUrl, WARN_COLOR)}
-    ${reportUrl ? `<br/>${ctaButton("View Full Report", reportUrl, BRAND_COLOR)}` : ""}
+    ${ctaSection}
 
     <hr style="margin:32px 0;border:none;border-top:1px solid #e5e7eb;" />
     <p style="margin:0;font-size:13px;color:${MUTED};line-height:1.6;">
@@ -204,7 +300,9 @@ export function highRiskAlertTemplate(input: HighRiskAlertInput): EmailTemplate 
   `;
 
   return {
-    subject: `[Parxx] Attention Required — Patterns Detected in Your Recent Session`,
+    subject: urgent
+      ? `[Parxx] URGENT — Immediate Attention Required`
+      : `[Parxx] Attention Required — Patterns Detected in Your Recent Session`,
     html: layout(WARN_COLOR, body),
   };
 }

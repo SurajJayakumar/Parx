@@ -1,5 +1,11 @@
 import "server-only";
 
+import {
+  computeSeverity,
+  type Inference,
+  type SeverityLabel,
+} from "@/lib/severity/severityScore";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -17,12 +23,20 @@ export type Metrics = {
   armSwing?: number;
 };
 
-export type Severity = "low" | "medium" | "high";
+export type RiskLevel = "low" | "medium" | "high";
+
+/** @deprecated Use RiskLevel instead. */
+export type Severity = RiskLevel;
 
 export interface RiskAssessment {
-  severity: Severity;
+  /** @deprecated Use riskLevel instead. */
+  severity: RiskLevel;
+  riskLevel: RiskLevel;
   /** Composite score clamped to [0, 100]. Higher = greater concern. */
   riskScore: number;
+  /** Severity label from the ML-inference layer (0–10 scale). */
+  severityScore: number;
+  severityLabel: SeverityLabel;
   /** Human-readable explanations for each contributing factor. */
   reasons: string[];
 }
@@ -130,14 +144,52 @@ function scoreArmSwing(degrees: number): ThresholdResult {
 // ---------------------------------------------------------------------------
 
 /**
+ * Maps a severityScore (0–10) to a RiskLevel.
+ *
+ * ≥ 5  → high   (freezing events and falls both land here or above)
+ * ≥ 2  → medium (parkinson-walk patterns)
+ * else → low
+ */
+function severityScoreToRiskLevel(severityScore: number): RiskLevel {
+  if (severityScore >= 5) return "high";
+  if (severityScore >= 2) return "medium";
+  return "low";
+}
+
+/**
+ * Derives a 0–100 riskScore from a severityScore (0–10).
+ *
+ * Base: severityScore * 10.
+ * Small adjustments keep the scale continuous and match the existing
+ * gait-metric sub-score magnitudes:
+ *   - fall (8–10)     → 80–100
+ *   - freezing (5–7)  → 50–70
+ *   - parkinson (2–4) → 20–40
+ *   - normal (0)      → 0
+ */
+function severityScoreToRisk100(severityScore: number): number {
+  return Math.min(100, Math.max(0, severityScore * 10));
+}
+
+/**
  * Assesses movement patterns and returns a composite risk score with
  * plain-language reasons for each contributing factor.
  *
- * - Scores from each present metric are averaged (missing metrics are ignored).
- * - The composite score is clamped to [0, 100].
- * - Severity bands: low < 35, medium 35–64, high ≥ 65.
+ * When `inference` is supplied the severity layer (computeSeverity) drives
+ * riskLevel and severityScore; the gait-metric sub-scores are blended in to
+ * produce the final riskScore on a 0–100 scale.
+ *
+ * Without `inference` the function behaves exactly as before, deriving
+ * everything from the metric sub-scores.
+ *
+ * Gait-metric severity bands (used when no inference is provided):
+ *   low < 35, medium 35–64, high ≥ 65.
  */
-export function assessRisk(metrics: Metrics): RiskAssessment {
+export function assessRisk(
+  metrics: Metrics,
+  inference?: Inference
+): RiskAssessment {
+  // --- Gait-metric sub-scores (unchanged logic) ---
   const results: ThresholdResult[] = [];
 
   if (metrics.walkingSpeed !== undefined) {
@@ -150,19 +202,57 @@ export function assessRisk(metrics: Metrics): RiskAssessment {
     results.push(scoreArmSwing(metrics.armSwing));
   }
 
-  const reasons = results
+  const metricReasons = results
     .map((r) => r.reason)
     .filter((r): r is string => r !== null);
 
-  const rawScore =
+  const rawMetricScore =
     results.length === 0
       ? 0
       : results.reduce((sum, r) => sum + r.subScore, 0) / results.length;
 
-  const riskScore = Math.round(Math.min(100, Math.max(0, rawScore)));
+  const metricRiskScore = Math.round(Math.min(100, Math.max(0, rawMetricScore)));
 
-  const severity: Severity =
+  // --- Severity layer ---
+  if (inference !== undefined) {
+    const { score: severityScore, label: severityLabel, reasons: sevReasons } =
+      computeSeverity(inference);
+
+    // Combine inference reasons with gait-metric reasons (deduplicated by content).
+    const allReasons = [
+      ...sevReasons,
+      ...metricReasons.filter((r) => !sevReasons.includes(r)),
+    ];
+
+    // Blend: severity layer is authoritative for level; metric score adds nuance.
+    const severityBase = severityScoreToRisk100(severityScore);
+    const riskScore = Math.round(
+      Math.min(100, severityBase * 0.75 + metricRiskScore * 0.25)
+    );
+
+    const riskLevel = severityScoreToRiskLevel(severityScore);
+
+    return {
+      severity: riskLevel,
+      riskLevel,
+      riskScore,
+      severityScore,
+      severityLabel,
+      reasons: allReasons,
+    };
+  }
+
+  // --- Fallback: no inference supplied ---
+  const riskScore = metricRiskScore;
+  const riskLevel: RiskLevel =
     riskScore >= 65 ? "high" : riskScore >= 35 ? "medium" : "low";
 
-  return { severity, riskScore, reasons };
+  return {
+    severity: riskLevel,
+    riskLevel,
+    riskScore,
+    severityScore: 0,
+    severityLabel: "normal",
+    reasons: metricReasons,
+  };
 }
