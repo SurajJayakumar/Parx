@@ -23,7 +23,13 @@ interface CameraCaptureProps {
 interface InferenceResult {
   probability: number;
   detected: boolean;
-  backend?: string;
+  fallProbability: number;
+  fallDetected: boolean;
+  severity: "low" | "medium" | "high";
+  backend?: {
+    pdnet?: string;
+    pdnet_fall?: string;
+  };
   updatedAt: number;
   symptomsSpike: boolean;
 }
@@ -354,18 +360,34 @@ export default function CameraCapture({
       }
 
       const out = (await resp.json()) as {
+        pdnet_probability?: number;
+        pdnet_detected?: boolean;
+        pdnet_fall_probability?: number;
+        pdnet_fall_detected?: boolean;
+        fall_flag?: boolean;
+        severity?: "low" | "medium" | "high";
         parkinson_probability?: number;
         parkinson_detected?: boolean;
-        backend?: string;
+        backend?: {
+          pdnet?: string;
+          pdnet_fall?: string;
+        };
       };
 
-      const probability = Number(out.parkinson_probability ?? 0);
-      const detected = Boolean(out.parkinson_detected);
-      const symptomsSpikeNow = detected || probability >= SYMPTOM_SPIKE_THRESHOLD;
+      const probability = Number(out.pdnet_probability ?? out.parkinson_probability ?? 0);
+      const detected = Boolean(out.pdnet_detected ?? out.parkinson_detected);
+      const fallProbability = Number(out.pdnet_fall_probability ?? 0);
+      const fallDetected = Boolean(out.pdnet_fall_detected ?? out.fall_flag);
+      const severity = out.severity ?? (fallDetected ? "high" : detected ? "medium" : "low");
+      const symptomsSpikeNow =
+        fallDetected || severity !== "low" || detected || probability >= SYMPTOM_SPIKE_THRESHOLD;
 
       setInference({
         probability,
         detected,
+        fallProbability,
+        fallDetected,
+        severity,
         backend: out.backend,
         updatedAt: Date.now(),
         symptomsSpike: symptomsSpikeNow,
@@ -602,7 +624,7 @@ export default function CameraCapture({
           aria-label="Live camera feed"
         />
 
-        {cameraState === "active" && (inference?.detected || symptomSpike) && (
+        {cameraState === "active" && (inference?.detected || inference?.fallDetected || symptomSpike) && (
           <>
             <div className="pointer-events-none absolute inset-0 bg-red-500/20 animate-pulse" />
             <div className="pointer-events-none absolute -left-10 top-1/3 h-32 w-32 rounded-full bg-red-500/30 blur-2xl animate-ping" />
@@ -669,6 +691,11 @@ export default function CameraCapture({
             Parkinson likelihood spiked to {(inference?.probability ?? 0).toFixed(2)}.
             Please pause and review this session.
           </p>
+          {inference?.fallDetected && (
+            <p className="mt-1 text-xs font-semibold text-red-600 dark:text-red-300">
+              Fall detected by pdnet_fall.
+            </p>
+          )}
         </div>
       )}
 
@@ -679,10 +706,22 @@ export default function CameraCapture({
               Inference: {inference ? (inference.detected ? "Parkinson detected" : "No Parkinson") : "warming up…"}
             </span>
             <span>
-              Probability: {inference ? inference.probability.toFixed(3) : "—"}
+              PD Prob: {inference ? inference.probability.toFixed(3) : "—"}
             </span>
             <span>
-              Backend: {inference?.backend ?? "—"}
+              Fall Prob: {inference ? inference.fallProbability.toFixed(3) : "—"}
+            </span>
+            <span>
+              Severity: {inference?.severity?.toUpperCase() ?? "—"}
+            </span>
+            <span>
+              Fall Flag: {inference ? (inference.fallDetected ? "YES" : "NO") : "—"}
+            </span>
+            <span>
+              Backend(pd): {inference?.backend?.pdnet ?? "—"}
+            </span>
+            <span>
+              Backend(fall): {inference?.backend?.pdnet_fall ?? "—"}
             </span>
           </div>
           {inferenceError && (

@@ -23,8 +23,10 @@ app.add_middleware(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-PT_PATH = BASE_DIR / "pdnet.pt"
-ONNX_PATH = BASE_DIR / "pdnet.onnx"
+PD_PT_PATH = BASE_DIR / "pdnet.pt"
+PD_ONNX_PATH = BASE_DIR / "pdnet.onnx"
+FALL_PT_PATH = BASE_DIR / "pdnet_fall.pt"
+FALL_ONNX_PATH = BASE_DIR / "pdnet_fall.onnx"
 DEFAULT_SEQ_LEN = 100
 
 
@@ -53,8 +55,11 @@ def _fix_seq_len(feats: np.ndarray, seq_len: int) -> np.ndarray:
     return feats
 
 
-class Predictor:
-    def __init__(self) -> None:
+class SinglePredictor:
+    def __init__(self, name: str, pt_path: Path, onnx_path: Path) -> None:
+        self.name = name
+        self.pt_path = pt_path
+        self.onnx_path = onnx_path
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.use_cuda = self.device == "cuda"
         if self.use_cuda:
@@ -73,11 +78,11 @@ class Predictor:
         self._load_model()
 
     def _load_model(self) -> None:
-        if PT_PATH.exists():
+        if self.pt_path.exists():
             try:
-                state = torch.load(PT_PATH, map_location=self.device)
+                state = torch.load(self.pt_path, map_location=self.device)
                 if "conv1.weight" not in state:
-                    raise ValueError("pdnet.pt is missing conv1.weight; expected PDNet state_dict")
+                    raise ValueError(f"{self.pt_path.name} is missing conv1.weight; expected PDNet state_dict")
 
                 inp_dim = int(state["conv1.weight"].shape[1])
                 model = PDNet(in_dim=inp_dim, num_classes=1)
@@ -90,9 +95,9 @@ class Predictor:
                 self.backend = f"torch:{self.device}"
                 return
             except Exception as exc:
-                self.model_error = f"Failed to load pdnet.pt: {exc}"
+                self.model_error = f"Failed to load {self.pt_path.name}: {exc}"
 
-        if ONNX_PATH.exists():
+        if self.onnx_path.exists():
             try:
                 providers: list[str]
                 if ort.get_device().upper() == "GPU":
@@ -100,17 +105,17 @@ class Predictor:
                 else:
                     providers = ["CPUExecutionProvider"]
 
-                sess = ort.InferenceSession(str(ONNX_PATH), providers=providers)
+                sess = ort.InferenceSession(str(self.onnx_path), providers=providers)
                 self.sess = sess
                 self.inp_dim = int(sess.get_inputs()[0].shape[-1])
                 self.backend = f"onnx:{sess.get_providers()[0]}"
                 return
             except Exception as exc:
-                self.model_error = f"Failed to load pdnet.onnx: {exc}"
+                self.model_error = f"Failed to load {self.onnx_path.name}: {exc}"
 
         if self.model_error is None:
             self.model_error = (
-                f"No model found. Expected {PT_PATH.name} or {ONNX_PATH.name} in {BASE_DIR}"
+                f"No model found for {self.name}. Expected {self.pt_path.name} or {self.onnx_path.name} in {BASE_DIR}"
             )
 
     def predict(self, seq: np.ndarray) -> float:
@@ -141,7 +146,38 @@ class Predictor:
             logits = self.sess.run(None, {self.sess.get_inputs()[0].name: seq[None, ...]})[0]
             return _sigmoid(np.asarray(logits).squeeze())
 
-        raise HTTPException(status_code=503, detail="No active inference backend")
+        raise HTTPException(status_code=503, detail=f"No active inference backend for {self.name}")
+
+
+class Predictor:
+    def __init__(self) -> None:
+        self.pdnet = SinglePredictor("pdnet", PD_PT_PATH, PD_ONNX_PATH)
+        self.pdnet_fall = SinglePredictor("pdnet_fall", FALL_PT_PATH, FALL_ONNX_PATH)
+
+    @property
+    def device(self) -> str:
+        return self.pdnet.device
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "pdnet": {
+                "status": "ok" if self.pdnet.backend else "degraded",
+                "backend": self.pdnet.backend,
+                "input_dim": self.pdnet.inp_dim,
+                "model_error": self.pdnet.model_error,
+            },
+            "pdnet_fall": {
+                "status": "ok" if self.pdnet_fall.backend else "degraded",
+                "backend": self.pdnet_fall.backend,
+                "input_dim": self.pdnet_fall.inp_dim,
+                "model_error": self.pdnet_fall.model_error,
+            },
+        }
+
+    def predict_both(self, seq: np.ndarray) -> tuple[float, float]:
+        pd_prob = self.pdnet.predict(seq)
+        fall_prob = self.pdnet_fall.predict(seq)
+        return pd_prob, fall_prob
 
 
 predictor = Predictor()
@@ -159,12 +195,12 @@ class PredictFeaturesRequest(BaseModel):
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    model_health = predictor.health()
+    any_ok = any(model["status"] == "ok" for model in model_health.values())
     return {
-        "status": "ok" if predictor.backend else "degraded",
-        "backend": predictor.backend,
+        "status": "ok" if any_ok else "degraded",
         "device": predictor.device,
-        "input_dim": predictor.inp_dim,
-        "model_error": predictor.model_error,
+        "models": model_health,
     }
 
 
@@ -172,12 +208,29 @@ async def health() -> dict[str, Any]:
 async def predict_features(req: PredictFeaturesRequest) -> dict[str, Any]:
     arr = np.asarray(req.features, dtype=np.float32)
     seq = _fix_seq_len(arr, req.seq_len)
-    prob = predictor.predict(seq)
-    detected = bool(prob >= 0.5)
+    pd_prob, fall_prob = predictor.predict_both(seq)
+    pd_detected = bool(pd_prob >= 0.5)
+    fall_detected = bool(fall_prob >= 0.5)
+    if fall_detected:
+        severity = "high"
+    elif pd_detected:
+        severity = "medium"
+    else:
+        severity = "low"
+
     return {
-        "parkinson_probability": float(prob),
-        "parkinson_detected": detected,
-        "backend": predictor.backend,
+        "pdnet_probability": float(pd_prob),
+        "pdnet_detected": pd_detected,
+        "pdnet_fall_probability": float(fall_prob),
+        "pdnet_fall_detected": fall_detected,
+        "fall_flag": fall_detected,
+        "severity": severity,
+        "parkinson_probability": float(pd_prob),
+        "parkinson_detected": pd_detected,
+        "backend": {
+            "pdnet": predictor.pdnet.backend,
+            "pdnet_fall": predictor.pdnet_fall.backend,
+        },
         "seq_len_used": int(seq.shape[0]),
     }
 
@@ -210,13 +263,29 @@ async def predict_frames(req: PredictFramesRequest) -> dict[str, Any]:
 
     feats = _frames_to_features(req.frames)
     seq = _fix_seq_len(feats, req.seq_len)
-    prob = predictor.predict(seq)
-    detected = bool(prob >= 0.5)
+    pd_prob, fall_prob = predictor.predict_both(seq)
+    pd_detected = bool(pd_prob >= 0.5)
+    fall_detected = bool(fall_prob >= 0.5)
+    if fall_detected:
+        severity = "high"
+    elif pd_detected:
+        severity = "medium"
+    else:
+        severity = "low"
 
     return {
-        "parkinson_probability": float(prob),
-        "parkinson_detected": detected,
-        "backend": predictor.backend,
+        "pdnet_probability": float(pd_prob),
+        "pdnet_detected": pd_detected,
+        "pdnet_fall_probability": float(fall_prob),
+        "pdnet_fall_detected": fall_detected,
+        "fall_flag": fall_detected,
+        "severity": severity,
+        "parkinson_probability": float(pd_prob),
+        "parkinson_detected": pd_detected,
+        "backend": {
+            "pdnet": predictor.pdnet.backend,
+            "pdnet_fall": predictor.pdnet_fall.backend,
+        },
         "frames_received": len(req.frames),
         "frames_used": int(min(len(req.frames), req.seq_len)),
     }
