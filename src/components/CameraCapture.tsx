@@ -348,6 +348,12 @@ export default function CameraCapture({
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
 
+  // Prevents multiple auto-reports from firing for the same fall event
+  const fallReportFiredRef = useRef(false);
+  // Stable refs so runInference can call handleGeneratePdf / stopStream without circular deps
+  const handleGeneratePdfRef = useRef<(() => Promise<void>) | null>(null);
+  const stopStreamRef = useRef<(() => Promise<void>) | null>(null);
+
   // Keep callback refs stable so interval/cleanup closures always see latest
   const onMetricsSnapshotRef = useRef(onMetricsSnapshot);
   const onSessionEndRef = useRef(onSessionEnd);
@@ -516,6 +522,9 @@ export default function CameraCapture({
     }
   }, [user, reportEvents]);
 
+  // Keep stable ref in sync so runInference can call it without circular deps
+  useEffect(() => { handleGeneratePdfRef.current = handleGeneratePdf; }, [handleGeneratePdf]);
+
   const handleClear = useCallback(async () => {
     if (!user || !sessionIdRef.current) {
       setReportEvents([]);
@@ -632,6 +641,16 @@ export default function CameraCapture({
           fallProbability,
           fallFlag: true,
         });
+
+        // Auto-generate PDF report, send email, and stop the camera on first fall detection
+        if (!fallReportFiredRef.current) {
+          fallReportFiredRef.current = true;
+          // Small delay so the fall event is committed to state before we snapshot it
+          setTimeout(() => {
+            void handleGeneratePdfRef.current?.();
+            void stopStreamRef.current?.();
+          }, 500);
+        }
       } else if (severity !== "low" || detected) {
         recordEvent("symptom", {
           severity,
@@ -749,9 +768,13 @@ export default function CameraCapture({
     setCameraState("idle");
   }, []);
 
+  // Keep stable ref in sync so runInference can call it without circular deps
+  useEffect(() => { stopStreamRef.current = stopStream; }, [stopStream]);
+
   const startStream = useCallback(async () => {
     setErrorMessage("");
     setInferenceError("");
+    fallReportFiredRef.current = false;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
