@@ -29,6 +29,39 @@ To learn more about Next.js, take a look at the following resources:
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
+## API Endpoints
+
+### `POST /api/alerts/weekly`
+
+Sends a weekly summary email to a caregiver via Resend. Expected JSON body:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `caregiverEmail` | `string` | ✓ | Recipient email address |
+| `patientName` | `string` | ✓ | Patient's display name |
+| `weekRange` | `string` | ✓ | Human-readable week label, e.g. `"Feb 17–23, 2026"` |
+| `metrics` | `Record<string, number>` | ✓ | Flat map of metric name → value |
+| `trendSummary` | `string` | ✓ | Short prose description of observed trends |
+| `dashboardUrl` | `string (url)` | ✓ | Link to the caregiver's dashboard |
+| `reportUrl` | `string (url)` | — | Link to the full weekly report (optional) |
+
+**Hook this endpoint to Vercel Cron weekly.** Add the following to `vercel.json`:
+
+```json
+{
+  "crons": [
+    {
+      "path": "/api/alerts/weekly",
+      "schedule": "0 8 * * 1"
+    }
+  ]
+}
+```
+
+> The cron expression above fires every Monday at 08:00 UTC. Adjust the schedule and supply the POST body from your cron handler or a Vercel Edge Function that fetches caregiver records and calls this endpoint for each patient.
+
+---
+
 ## Deploy on Vercel
 
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.

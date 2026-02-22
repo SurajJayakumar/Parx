@@ -5,12 +5,19 @@ import { Card, CardSectionLabel } from "@/components/ui/Card";
 
 type CameraState = "idle" | "active" | "error";
 
-interface MotionMetrics {
+export interface MotionMetrics {
   walkingSpeed?: number;
   cadence?: number;
   stepLength?: number;
   armSwingL?: number;
   armSwingR?: number;
+}
+
+interface CameraCaptureProps {
+  /** Called each time the metrics snapshot changes while the camera is active */
+  onMetricsSnapshot?: (metrics: MotionMetrics) => void;
+  /** Called when the camera stream is stopped */
+  onSessionEnd?: (metrics: MotionMetrics) => void;
 }
 
 const METRIC_DEFS: {
@@ -85,13 +92,29 @@ function getErrorMessage(err: unknown): string {
   return "An unexpected error occurred while accessing the camera.";
 }
 
-export default function CameraCapture() {
+export default function CameraCapture({
+  onMetricsSnapshot,
+  onSessionEnd,
+}: CameraCaptureProps = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [cameraState, setCameraState] = useState<CameraState>("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
   // Metrics are undefined until MediaPipe populates them.
   const [metrics] = useState<MotionMetrics>({});
+
+  // Keep callback refs stable so interval/cleanup closures always see latest
+  const onMetricsSnapshotRef = useRef(onMetricsSnapshot);
+  const onSessionEndRef = useRef(onSessionEnd);
+  useEffect(() => { onMetricsSnapshotRef.current = onMetricsSnapshot; }, [onMetricsSnapshot]);
+  useEffect(() => { onSessionEndRef.current = onSessionEnd; }, [onSessionEnd]);
+
+  // Notify parent whenever metrics change while active
+  useEffect(() => {
+    if (cameraState === "active") {
+      onMetricsSnapshotRef.current?.(metrics);
+    }
+  }, [metrics, cameraState]);
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
@@ -101,7 +124,9 @@ export default function CameraCapture() {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    onSessionEndRef.current?.(metrics);
     setCameraState("idle");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startStream = useCallback(async () => {

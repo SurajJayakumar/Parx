@@ -6,6 +6,38 @@ import AuthGate from "@/components/AuthGate";
 import { Card, CardSectionLabel } from "@/components/ui/Card";
 import { useAuth } from "@/lib/useAuth";
 import { signOutUser } from "@/lib/firebaseAuth";
+import { getUserProfile, saveUserProfile } from "@/lib/profile/profileStore";
+
+const DEBUG = process.env.NODE_ENV === "development";
+
+// ---------------------------------------------------------------------------
+// Demo helpers
+// ---------------------------------------------------------------------------
+
+type DemoResult = { ok: true; detail?: string } | { ok: false; error: string };
+
+async function demoFetch(
+  url: string,
+  body: Record<string, unknown>,
+): Promise<DemoResult> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    if (!res.ok || json.ok === false) {
+      return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    }
+    const detail = json.severity
+      ? `severity=${json.severity} score=${json.riskScore} sent=${json.sent}`
+      : undefined;
+    return { ok: true, detail };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 export default function ProfilePage() {
   const { user } = useAuth();
@@ -14,12 +46,111 @@ export default function ProfilePage() {
   const [patientName, setPatientName] = useState("");
   const [caregiverEmail, setCaregiverEmail] = useState("");
   const [emailNotifications, setEmailNotifications] = useState(false);
+  const [emailError, setEmailError] = useState("");
   const [toast, setToast] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
-  function handleSave(e: React.FormEvent) {
+  type DemoKey = "highRisk" | "reportReady" | "weeklySummary";
+  const [demoLoading, setDemoLoading] = useState<DemoKey | null>(null);
+  const [demoResults, setDemoResults] = useState<Partial<Record<DemoKey, DemoResult>>>({});
+
+  async function runDemo(
+    key: DemoKey,
+    buildBody: (email: string, name: string) => Record<string, unknown>,
+  ) {
+    setDemoLoading(key);
+    setDemoResults((prev) => ({ ...prev, [key]: undefined }));
+
+    let result: DemoResult;
+
+    const profile = await getUserProfile();
+
+    if (!profile || !profile.caregiverEmail.trim()) {
+      result = { ok: false, error: "No caregiver email saved. Fill in the Profile form and save first." };
+    } else if (!profile.emailNotificationsEnabled) {
+      result = { ok: false, error: "Email notifications are disabled. Enable them in the Profile form and save first." };
+    } else {
+      const url = key === "highRisk"
+        ? "/api/sessions/ingest"
+        : key === "reportReady"
+          ? "/api/reports/notify"
+          : "/api/alerts/weekly";
+      result = await demoFetch(url, buildBody(profile.caregiverEmail, profile.patientName || "Demo Patient"));
+    }
+
+    setDemoResults((prev) => ({ ...prev, [key]: result }));
+    setDemoLoading(null);
+  }
+
+  function triggerHighRisk() {
+    const origin = window.location.origin;
+    runDemo("highRisk", (caregiverEmail, patientName) => ({
+      caregiverEmail,
+      patientName,
+      metrics: { walkingSpeed: 0.65, stepLength: 0.42, armSwing: 0.28 },
+      dashboardUrl: `${origin}/dashboard`,
+    }));
+  }
+
+  function triggerReportReady() {
+    const origin = window.location.origin;
+    runDemo("reportReady", (caregiverEmail, patientName) => ({
+      caregiverEmail,
+      patientName,
+      reportDate: new Date().toISOString().slice(0, 10),
+      severity: "medium",
+      riskScore: 62,
+      dashboardUrl: `${origin}/dashboard`,
+      reportUrl: `${origin}/dashboard`,
+    }));
+  }
+
+  function triggerWeeklySummary() {
+    const origin = window.location.origin;
+    runDemo("weeklySummary", (caregiverEmail, patientName) => ({
+      caregiverEmail,
+      patientName,
+      weekRange: "Feb 16–22, 2026",
+      metrics: { walkingSpeed: 0.9, stepLength: 0.58, armSwing: 0.44 },
+      trendSummary: "Gait stability improved slightly compared to last week.",
+      dashboardUrl: `${origin}/dashboard`,
+    }));
+  }
+
+  // Load profile from Firestore once on mount
+  useEffect(() => {
+    getUserProfile().then((profile) => {
+      if (!profile) return;
+      setPatientName(profile.patientName);
+      setCaregiverEmail(profile.caregiverEmail);
+      setEmailNotifications(profile.emailNotificationsEnabled);
+    });
+  }, []);
+
+  async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    setToast(true);
+
+    const trimmedEmail = caregiverEmail.trim();
+    const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+    if (!emailValid) {
+      setEmailError("Please enter a valid email address.");
+      return;
+    }
+    setEmailError("");
+    setCaregiverEmail(trimmedEmail);
+
+    setSaving(true);
+    try {
+      await saveUserProfile({
+        patientName,
+        caregiverEmail: trimmedEmail,
+        emailNotificationsEnabled: emailNotifications,
+      });
+      setToast(true);
+    } finally {
+      setSaving(false);
+    }
   }
 
   useEffect(() => {
@@ -100,10 +231,20 @@ export default function ProfilePage() {
               id="caregiver-email"
               type="email"
               value={caregiverEmail}
-              onChange={(e) => setCaregiverEmail(e.target.value)}
+              onChange={(e) => { setCaregiverEmail(e.target.value); setEmailError(""); }}
               placeholder="caregiver@example.com"
-              className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-4 py-2.5 text-sm text-zinc-900 dark:text-zinc-50 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-50"
+              aria-describedby={emailError ? "email-error" : undefined}
+              className={`w-full rounded-xl border bg-zinc-50 dark:bg-zinc-800 px-4 py-2.5 text-sm text-zinc-900 dark:text-zinc-50 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-50 ${
+                emailError
+                  ? "border-red-400 dark:border-red-500"
+                  : "border-zinc-200 dark:border-zinc-700"
+              }`}
             />
+            {emailError && (
+              <p id="email-error" className="mt-1.5 text-xs text-red-500 dark:text-red-400">
+                {emailError}
+              </p>
+            )}
           </Card>
         </section>
 
@@ -124,7 +265,7 @@ export default function ProfilePage() {
                 type="button"
                 role="switch"
                 aria-checked={emailNotifications}
-                onClick={() => setEmailNotifications((v) => !v)}
+                onClick={() => setEmailNotifications((prev) => !prev)}
                 className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-50 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-zinc-900 ${
                   emailNotifications
                     ? "bg-zinc-900 dark:bg-zinc-50"
@@ -162,12 +303,80 @@ export default function ProfilePage() {
 
           <button
             type="submit"
-            className="rounded-full bg-zinc-900 dark:bg-zinc-50 px-6 py-2.5 text-sm font-medium text-white dark:text-zinc-900 transition-opacity hover:opacity-80 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-50 focus:ring-offset-2"
+            disabled={saving}
+            className="flex items-center gap-2 rounded-full bg-zinc-900 dark:bg-zinc-50 px-6 py-2.5 text-sm font-medium text-white dark:text-zinc-900 transition-opacity hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-50 focus:ring-offset-2"
           >
-            Save
+            {saving && (
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            )}
+            {saving ? "Saving…" : "Save"}
           </button>
         </div>
       </form>
+
+      {/* Demo Controls — visible only in development */}
+      {DEBUG && (
+        <section className="mt-10">
+          <CardSectionLabel>Demo Controls</CardSectionLabel>
+          <Card>
+            <p className="text-xs text-amber-600 dark:text-amber-400 mb-4 font-medium">
+              Development only — uses the caregiver email and patient name saved above.
+            </p>
+            <div className="space-y-3">
+              {(
+                [
+                  {
+                    key: "highRisk" as const,
+                    label: "Trigger High Risk Alert (Demo)",
+                    handler: triggerHighRisk,
+                  },
+                  {
+                    key: "reportReady" as const,
+                    label: "Trigger Report Ready (Demo)",
+                    handler: triggerReportReady,
+                  },
+                  {
+                    key: "weeklySummary" as const,
+                    label: "Trigger Weekly Summary (Demo)",
+                    handler: triggerWeeklySummary,
+                  },
+                ] as const
+              ).map(({ key, label, handler }) => {
+                const result = demoResults[key];
+                const loading = demoLoading === key;
+                return (
+                  <div key={key}>
+                    <button
+                      type="button"
+                      onClick={handler}
+                      disabled={demoLoading !== null}
+                      className="flex items-center gap-2 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-4 py-2.5 text-sm font-medium text-zinc-700 dark:text-zinc-300 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-50 focus:ring-offset-2 w-full text-left"
+                    >
+                      {loading && (
+                        <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                      )}
+                      {label}
+                    </button>
+                    {result !== undefined && (
+                      <p
+                        className={`mt-1.5 text-xs px-1 ${
+                          result.ok
+                            ? "text-green-600 dark:text-green-400"
+                            : "text-red-600 dark:text-red-400"
+                        }`}
+                      >
+                        {result.ok
+                          ? `Success${result.detail ? ` — ${result.detail}` : ""}`
+                          : `Error: ${result.error}`}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        </section>
+      )}
 
       {/* Toast */}
       <div
@@ -190,7 +399,7 @@ export default function ProfilePage() {
           >
             <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
           </svg>
-          Saved locally (temporary)
+          Saved ✅
         </div>
       </div>
     </AuthGate>
