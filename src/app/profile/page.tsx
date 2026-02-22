@@ -64,7 +64,7 @@ export default function ProfilePage() {
 
     let result: DemoResult;
 
-    const profile = await getUserProfile();
+    const profile = user ? await getUserProfile(user.uid) : null;
 
     if (!profile || !profile.caregiverEmail.trim()) {
       result = { ok: false, error: "No caregiver email saved. Fill in the Profile form and save first." };
@@ -118,15 +118,16 @@ export default function ProfilePage() {
     }));
   }
 
-  // Load profile from Firestore once on mount
+  // Load profile from Firestore once the authenticated user is available
   useEffect(() => {
-    getUserProfile().then((profile) => {
+    if (!user) return;
+    getUserProfile(user.uid).then((profile) => {
       if (!profile) return;
       setPatientName(profile.patientName);
       setCaregiverEmail(profile.caregiverEmail);
       setEmailNotifications(profile.emailNotificationsEnabled);
     });
-  }, []);
+  }, [user]);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -140,9 +141,10 @@ export default function ProfilePage() {
     setEmailError("");
     setCaregiverEmail(trimmedEmail);
 
+    if (!user) return;
     setSaving(true);
     try {
-      await saveUserProfile({
+      await saveUserProfile(user.uid, {
         patientName,
         caregiverEmail: trimmedEmail,
         emailNotificationsEnabled: emailNotifications,
