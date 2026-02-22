@@ -119,5 +119,10 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    type: "weekly_summary",
+    subject,
+    sentTo: caregiverEmail,
+  });
 }

@@ -126,5 +126,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: `Email could not be sent: ${msg}` }, { status: 502 });
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    type: "report_ready",
+    subject,
+    sentTo: caregiverEmail,
+    severityScore: riskScore,
+    severityLabel: severity,
+  });
 }

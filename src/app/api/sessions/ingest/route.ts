@@ -212,5 +212,12 @@ export async function POST(req: NextRequest) {
     return fail(`Alert email could not be sent: ${msg}`, 502);
   }
 
-  return ok({ sent: true, urgent: isUrgent, ...base });
+  return ok({
+    sent: true,
+    urgent: isUrgent,
+    type: "high_risk",
+    subject: emailSubject,
+    sentTo: caregiverEmail,
+    ...base,
+  });
 }
