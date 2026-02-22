@@ -2,6 +2,15 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Card, CardSectionLabel } from "@/components/ui/Card";
+import { useAuth } from "@/lib/useAuth";
+import {
+  getOrCreateTodaySession,
+  appendSessionEvent,
+  clearSessionEvents,
+  subscribeSessionEvents,
+  type SessionEvent,
+} from "@/lib/sessions/sessionStore";
+import { appendMetricSnapshot, loadMetricSnapshots } from "@/lib/sessions/metricsStore";
 
 type CameraState = "idle" | "active" | "error";
 
@@ -84,26 +93,6 @@ const METRIC_DEFS: {
   unit: string;
   icon: React.ReactNode;
 }[] = [
-  {
-    key: "walkingSpeed",
-    label: "Walking Speed",
-    unit: "m/s",
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5" aria-hidden="true">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.5l7.5-7.5 6 6L21 6" />
-      </svg>
-    ),
-  },
-  {
-    key: "cadence",
-    label: "Step Cadence",
-    unit: "steps/min",
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5" aria-hidden="true">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    ),
-  },
   {
     key: "stepLength",
     label: "Step Length",
@@ -324,6 +313,9 @@ export default function CameraCapture({
   onMetricsSnapshot,
   onSessionEnd,
 }: CameraCaptureProps = {}) {
+  const { user } = useAuth();
+  const sessionIdRef = useRef<string | null>(null);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const holisticRef = useRef<{ send: (args: { image: HTMLVideoElement }) => Promise<void>; close?: () => Promise<void> | void } | null>(null);
@@ -336,6 +328,7 @@ export default function CameraCapture({
   const prevTsRef = useRef<number | null>(null);
   const metricsRef = useRef<MotionMetrics>({});
   const metricsTickRef = useRef<number>(0);
+  const metricsPersistTickRef = useRef<number>(0);
   const spikeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastOccurrenceAtRef = useRef<{ symptom: number; fall: number }>({
     symptom: 0,
@@ -349,6 +342,11 @@ export default function CameraCapture({
   const [symptomSpike, setSymptomSpike] = useState(false);
   const [centralNow, setCentralNow] = useState<Date>(new Date());
   const [reportEvents, setReportEvents] = useState<ReportEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(true);
+  const [pdfGenerating, setPdfGenerating] = useState(false);
+  const [pdfToast, setPdfToast] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
 
   // Keep callback refs stable so interval/cleanup closures always see latest
   const onMetricsSnapshotRef = useRef(onMetricsSnapshot);
@@ -370,6 +368,56 @@ export default function CameraCapture({
     }, 1000);
     return () => clearInterval(id);
   }, []);
+
+  // Bootstrap today's session, then open a live onSnapshot subscription
+  useEffect(() => {
+    if (!user) return;
+    let unsubscribe: (() => void) | null = null;
+    let cancelled = false;
+
+    setEventsLoading(true);
+
+    (async () => {
+      try {
+        const sessionId = await getOrCreateTodaySession(user.uid);
+        if (cancelled) return;
+        sessionIdRef.current = sessionId;
+
+        unsubscribe = subscribeSessionEvents(
+          user.uid,
+          sessionId,
+          (firestoreEvents: SessionEvent[]) => {
+            // subscribeSessionEvents returns newest-first already
+            const mapped: ReportEvent[] = firestoreEvents.map((e) => ({
+              id: e.id,
+              type: e.type,
+              severity: e.severity,
+              pdProbability: e.pdProbability,
+              fallProbability: e.fallProbability,
+              fallFlag: e.fallDetected,
+              isoTimestamp: e.isoTimestamp,
+              centralDate: e.centralDate,
+              centralTime: e.centralTime,
+            }));
+            setReportEvents(mapped);
+            setEventsLoading(false);
+          },
+          () => {
+            // On error, stop showing the spinner but keep whatever was loaded
+            setEventsLoading(false);
+          },
+        );
+      } catch {
+        // getOrCreateTodaySession failed — non-fatal
+        setEventsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [user]);
 
   const recordEvent = useCallback((
     type: ReportEventType,
@@ -402,71 +450,89 @@ export default function CameraCapture({
     };
 
     setReportEvents((prev) => [event, ...prev].slice(0, 500));
-  }, []);
 
-  const downloadReport = useCallback((format: "json" | "csv") => {
-    if (reportEvents.length === 0) {
+    // Persist to Firestore (best-effort, non-blocking)
+    const uid = user?.uid;
+    const sessionId = sessionIdRef.current;
+    if (uid && sessionId) {
+      appendSessionEvent(uid, sessionId, {
+        type: event.type,
+        severity: event.severity,
+        fallDetected: event.fallFlag,
+        pdProbability: event.pdProbability,
+        fallProbability: event.fallProbability,
+        isoTimestamp: event.isoTimestamp,
+        centralDate: event.centralDate,
+        centralTime: event.centralTime,
+      }).catch(() => {
+        // Non-fatal — local state already updated
+      });
+    }
+  }, [user]);
+
+  const handleGeneratePdf = useCallback(async () => {
+    if (!user || !sessionIdRef.current) return;
+    setPdfGenerating(true);
+    setPdfError(null);
+    try {
+      const metricSnapshots = await loadMetricSnapshots(user.uid, sessionIdRef.current, 300).catch(() => []);
+
+      const res = await fetch("/api/reports/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          uid: user.uid,
+          sessionId: sessionIdRef.current,
+          patientName: "Patient",
+          events: reportEvents.map((e) => ({
+            type: e.type,
+            severity: e.severity,
+            fallDetected: e.fallFlag,
+            pdProbability: e.pdProbability,
+            fallProbability: e.fallProbability,
+            centralDate: e.centralDate,
+            centralTime: e.centralTime,
+          })),
+          metricSnapshots: metricSnapshots.map((s) => ({
+            ts: s.ts,
+            stepLength: s.stepLength,
+            armSwingL: s.armSwingL,
+            armSwingR: s.armSwingR,
+          })),
+        }),
+      });
+
+      const json = (await res.json()) as { ok: boolean; error?: string };
+
+      if (!json.ok) throw new Error(json.error ?? "Report generation failed.");
+
+      setPdfToast(true);
+      setTimeout(() => setPdfToast(false), 6000);
+    } catch (err) {
+      setPdfError(err instanceof Error ? err.message : "Unknown error.");
+    } finally {
+      setPdfGenerating(false);
+    }
+  }, [user, reportEvents]);
+
+  const handleClear = useCallback(async () => {
+    if (!user || !sessionIdRef.current) {
+      setReportEvents([]);
       return;
     }
-
-    const stamp = toCentralDateParts(new Date());
-    const safeStamp = `${stamp.datePart.replace(/\//g, "-")}_${stamp.timePart.replace(/:/g, "-")}`;
-
-    let content = "";
-    let fileName = "";
-    let mime = "";
-
-    if (format === "json") {
-      content = JSON.stringify(
-        {
-          timezone: "Central Time (America/Chicago)",
-          generatedAtCentral: `${stamp.datePart} ${stamp.timePart} CT`,
-          totalOccurrences: reportEvents.length,
-          events: reportEvents,
-        },
-        null,
-        2,
-      );
-      fileName = `camera_report_${safeStamp}.json`;
-      mime = "application/json";
-    } else {
-      const header = [
-        "event_type",
-        "severity",
-        "fall_flag",
-        "pd_probability",
-        "fall_probability",
-        "central_date",
-        "central_time",
-        "utc_iso_timestamp",
-      ].join(",");
-
-      const rows = reportEvents.map((e) => [
-        e.type,
-        e.severity,
-        String(e.fallFlag),
-        e.pdProbability.toFixed(4),
-        e.fallProbability.toFixed(4),
-        e.centralDate,
-        e.centralTime,
-        e.isoTimestamp,
-      ].join(","));
-
-      content = [header, ...rows].join("\n");
-      fileName = `camera_report_${safeStamp}.csv`;
-      mime = "text/csv;charset=utf-8";
+    setClearing(true);
+    try {
+      await clearSessionEvents(user.uid, sessionIdRef.current);
+      // Local state will be cleared by the Firestore onSnapshot callback,
+      // but clear it immediately for instant feedback.
+      setReportEvents([]);
+    } catch {
+      // Non-fatal — clear local state anyway
+      setReportEvents([]);
+    } finally {
+      setClearing(false);
     }
-
-    const blob = new Blob([content], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = fileName;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
-  }, [reportEvents]);
+  }, [user]);
 
   const triggerSymptomSpike = useCallback(() => {
     setSymptomSpike(true);
@@ -674,6 +740,8 @@ export default function CameraCapture({
     inferBusyRef.current = false;
     prevHipRef.current = null;
     prevTsRef.current = null;
+    metricsTickRef.current = 0;
+    metricsPersistTickRef.current = 0;
     lastOccurrenceAtRef.current = { symptom: 0, fall: 0 };
 
     onSessionEndRef.current?.(metricsRef.current);
@@ -733,6 +801,19 @@ export default function CameraCapture({
           if (now - metricsTickRef.current > 250) {
             metricsTickRef.current = now;
             setMetrics(snapshot);
+          }
+          // Persist to Firestore at most once every 2 seconds
+          if (
+            now - metricsPersistTickRef.current > 2_000 &&
+            sessionIdRef.current &&
+            user?.uid
+          ) {
+            metricsPersistTickRef.current = now;
+            const uid = user.uid;
+            const sid = sessionIdRef.current;
+            appendMetricSnapshot(uid, sid, { ...snapshot, ts: Date.now() }).catch(
+              () => {/* fire-and-forget */},
+            );
           }
         } catch {
           // skip invalid frame features
@@ -805,7 +886,7 @@ export default function CameraCapture({
           <>
             <div className="pointer-events-none absolute inset-0 bg-red-500/20 animate-pulse" />
             <div className="pointer-events-none absolute -left-10 top-1/3 h-32 w-32 rounded-full bg-red-500/30 blur-2xl animate-ping" />
-            <div className="pointer-events-none absolute right-[-2.5rem] top-1/2 h-36 w-36 rounded-full bg-red-500/30 blur-2xl animate-ping" />
+            <div className="pointer-events-none absolute -right-10 top-1/2 h-36 w-36 rounded-full bg-red-500/30 blur-2xl animate-ping" />
             <div className="pointer-events-none absolute left-1/3 -bottom-10 h-40 w-40 rounded-full bg-red-600/30 blur-3xl animate-pulse" />
           </>
         )}
@@ -838,6 +919,31 @@ export default function CameraCapture({
           </div>
         )}
 
+        {/* Start / Stop — bottom-center overlay */}
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
+          {cameraState !== "active" ? (
+            <button
+              onClick={startStream}
+              className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg backdrop-blur-sm ring-1 ring-indigo-500/50 transition hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+            >
+              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 5v14l11-7L8 5z" />
+              </svg>
+              Start Session
+            </button>
+          ) : (
+            <button
+              onClick={() => { void stopStream(); }}
+              className="inline-flex items-center gap-2 rounded-xl bg-zinc-800/80 px-5 py-2.5 text-sm font-semibold text-white shadow-lg backdrop-blur-sm ring-1 ring-zinc-600/50 transition hover:bg-zinc-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500"
+            >
+              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 6h12v12H6z" />
+              </svg>
+              Stop
+            </button>
+          )}
+        </div>
+
         {/* Error overlay */}
         {cameraState === "error" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
@@ -864,19 +970,36 @@ export default function CameraCapture({
       </div>
 
       {(inference?.symptomsSpike || symptomSpike) && (
-        <div className="w-full rounded-2xl border border-red-400/60 bg-red-500/10 px-4 py-3">
-          <p className="text-sm font-semibold text-red-500 dark:text-red-300">
-            Symptom spike alert
-          </p>
-          <p className="mt-1 text-xs text-red-500/90 dark:text-red-300/90">
-            Parkinson likelihood spiked to {(inference?.probability ?? 0).toFixed(2)}.
-            Please pause and review this session.
-          </p>
-          {inference?.fallDetected && (
-            <p className="mt-1 text-xs font-semibold text-red-600 dark:text-red-300">
-              Fall detected by pdnet_fall.
-            </p>
-          )}
+        <div className="w-full flex items-center gap-2.5 rounded-xl border border-red-500/30 bg-red-500/8 dark:bg-red-500/10 px-3 py-2">
+          {/* severity color dot */}
+          <span className={[
+            "h-2 w-2 shrink-0 rounded-full",
+            inference?.severity === "high" || inference?.fallDetected
+              ? "bg-red-500 shadow-[0_0_6px_2px_rgba(239,68,68,0.55)]"
+              : inference?.severity === "medium"
+                ? "bg-amber-400 shadow-[0_0_6px_2px_rgba(251,191,36,0.55)]"
+                : "bg-yellow-300",
+          ].join(" ")} />
+          <div className="flex min-w-0 flex-1 items-center gap-2 flex-wrap">
+            <span className="text-xs font-semibold text-red-500 dark:text-red-300 uppercase tracking-wide whitespace-nowrap">
+              {inference?.fallDetected ? "Fall detected" : "Symptom spike"}
+            </span>
+            <span className="text-xs text-red-500/80 dark:text-red-300/80">
+              PD&nbsp;{(inference?.probability ?? 0).toFixed(2)}
+              &nbsp;·&nbsp;Severity&nbsp;
+              <span className="font-medium">{(inference?.severity ?? "—").toUpperCase()}</span>
+            </span>
+          </div>
+          <span className={[
+            "shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+            inference?.severity === "high" || inference?.fallDetected
+              ? "bg-red-500/20 text-red-400"
+              : inference?.severity === "medium"
+                ? "bg-amber-500/20 text-amber-400"
+                : "bg-yellow-500/20 text-yellow-400",
+          ].join(" ")}>
+            {inference?.severity ?? "low"}
+          </span>
         </div>
       )}
 
@@ -913,94 +1036,103 @@ export default function CameraCapture({
         </div>
       )}
 
-      {/* Controls */}
-      <div className="flex gap-3">
-        {cameraState !== "active" ? (
-          <button
-            onClick={startStream}
-            className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-          >
-            <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M8 5v14l11-7L8 5z" />
-            </svg>
-            Start
-          </button>
-        ) : (
-          <button
-            onClick={() => {
-              void stopStream();
-            }}
-            className="inline-flex items-center gap-2 rounded-xl bg-zinc-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500"
-          >
-            <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M6 6h12v12H6z" />
-            </svg>
-            Stop
-          </button>
-        )}
-      </div>
-
       <section aria-labelledby="session-report-heading" className="w-full mt-2">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <CardSectionLabel id="session-report-heading">Session Report</CardSectionLabel>
           <div className="flex gap-2">
             <button
-              onClick={() => downloadReport("csv")}
-              disabled={reportEvents.length === 0}
-              className="inline-flex items-center rounded-lg border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-xs font-semibold text-zinc-700 dark:text-zinc-200 disabled:opacity-50"
+              onClick={() => void handleGeneratePdf()}
+              disabled={pdfGenerating || eventsLoading}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:opacity-50"
             >
-              Export CSV
+              {pdfGenerating ? (
+                <span className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-white border-t-transparent" />
+              ) : (
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                </svg>
+              )}
+              {pdfGenerating ? "Generating…" : "Generate PDF Report"}
             </button>
             <button
-              onClick={() => downloadReport("json")}
-              disabled={reportEvents.length === 0}
-              className="inline-flex items-center rounded-lg border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-xs font-semibold text-zinc-700 dark:text-zinc-200 disabled:opacity-50"
+              onClick={() => { void handleClear(); }}
+              disabled={eventsLoading || clearing || reportEvents.length === 0}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-xs font-semibold text-zinc-700 dark:text-zinc-200 disabled:opacity-50"
             >
-              Export JSON
-            </button>
-            <button
-              onClick={() => setReportEvents([])}
-              disabled={reportEvents.length === 0}
-              className="inline-flex items-center rounded-lg border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-xs font-semibold text-zinc-700 dark:text-zinc-200 disabled:opacity-50"
-            >
-              Clear
+              {clearing && (
+                <span className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-zinc-400 border-t-transparent" />
+              )}
+              {clearing ? "Clearing…" : "Clear"}
             </button>
           </div>
         </div>
 
-        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white/80 dark:bg-zinc-900/70 p-3">
-          {reportEvents.length === 0 ? (
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              No symptom or fall occurrences logged yet for this session.
-            </p>
+        {pdfError && (
+          <div className="mb-2 flex items-center gap-3 rounded-xl px-3 py-2 text-xs bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800">
+            <p className="text-red-600 dark:text-red-400">{pdfError}</p>
+          </div>
+        )}
+
+        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden">
+          {eventsLoading ? (
+            <div className="flex items-center gap-2 px-4 py-3 text-xs text-zinc-500 dark:text-zinc-400">
+              <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-zinc-400 border-t-transparent" />
+              Loading session events…
+            </div>
+          ) : reportEvents.length === 0 ? (
+            <div className="flex flex-col gap-0.5 px-4 py-3">
+              <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">No events yet</p>
+              <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                Symptom and fall detections will appear here in real time.
+              </p>
+            </div>
           ) : (
             <div className="max-h-56 overflow-auto">
-              <table className="w-full text-xs">
-                <thead className="text-zinc-500 dark:text-zinc-400">
+              <table className="w-full text-xs border-collapse">
+                <thead className="sticky top-0 z-10 bg-zinc-50 dark:bg-zinc-800 border-b border-zinc-200 dark:border-zinc-700">
                   <tr>
-                    <th className="py-1 text-left font-medium">Type</th>
-                    <th className="py-1 text-left font-medium">Severity</th>
-                    <th className="py-1 text-left font-medium">Fall</th>
-                    <th className="py-1 text-left font-medium">Date (CT)</th>
-                    <th className="py-1 text-left font-medium">Time (CT)</th>
+                    {["Type", "Severity", "Fall", "Date (CT)", "Time (CT)"].map((h) => (
+                      <th
+                        key={h}
+                        className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500"
+                      >
+                        {h}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {reportEvents.map((event) => (
-                    <tr key={event.id} className="border-t border-zinc-200/70 dark:border-zinc-800/80">
-                      <td className="py-1.5 pr-2 text-zinc-700 dark:text-zinc-200">
+                  {reportEvents.map((event, i) => (
+                    <tr
+                      key={event.id}
+                      className={i % 2 === 0 ? "bg-white dark:bg-zinc-900" : "bg-zinc-50/60 dark:bg-zinc-800/40"}
+                    >
+                      <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300 capitalize font-medium">
                         {event.type}
                       </td>
-                      <td className="py-1.5 pr-2 text-zinc-700 dark:text-zinc-200">
-                        {event.severity.toUpperCase()}
+                      <td className="px-3 py-1.5">
+                        <span className={[
+                          "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                          event.severity === "high"
+                            ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400"
+                            : event.severity === "medium"
+                              ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+                              : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
+                        ].join(" ")}>
+                          {event.severity}
+                        </span>
                       </td>
-                      <td className="py-1.5 pr-2 text-zinc-700 dark:text-zinc-200">
-                        {event.fallFlag ? "YES" : "NO"}
+                      <td className="px-3 py-1.5">
+                        {event.fallFlag ? (
+                          <span className="text-[10px] font-semibold text-red-500 dark:text-red-400">YES</span>
+                        ) : (
+                          <span className="text-[10px] text-zinc-400 dark:text-zinc-500">—</span>
+                        )}
                       </td>
-                      <td className="py-1.5 pr-2 text-zinc-700 dark:text-zinc-200">
+                      <td className="px-3 py-1.5 text-zinc-500 dark:text-zinc-400 tabular-nums">
                         {event.centralDate}
                       </td>
-                      <td className="py-1.5 pr-2 text-zinc-700 dark:text-zinc-200">
+                      <td className="px-3 py-1.5 text-zinc-500 dark:text-zinc-400 tabular-nums">
                         {event.centralTime}
                       </td>
                     </tr>
@@ -1012,10 +1144,56 @@ export default function CameraCapture({
         </div>
       </section>
 
+      {/* Report ready toast */}
+      <div aria-live="polite" aria-atomic="true" className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+        <div
+          className={`w-[calc(100vw-2rem)] max-w-sm flex items-start gap-3.5 rounded-2xl bg-emerald-600 px-5 py-4 shadow-xl ring-1 ring-emerald-500/40 transition-all duration-500 ease-out ${
+            pdfToast
+              ? "opacity-100 translate-y-0 scale-100"
+              : "opacity-0 translate-y-4 scale-95 pointer-events-none"
+          }`}
+        >
+          {/* Icon */}
+          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/20">
+            <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+            </svg>
+          </div>
+
+          {/* Text + link */}
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-white leading-snug">
+              Your report is ready!
+            </p>
+            <p className="mt-0.5 text-xs text-emerald-100 leading-snug">
+              Check the{" "}
+              <a
+                href="/dashboard"
+                className="pointer-events-auto font-semibold text-white underline underline-offset-2 hover:text-emerald-100"
+              >
+                Dashboard
+              </a>{" "}
+              to view it.
+            </p>
+          </div>
+
+          {/* Dismiss */}
+          <button
+            onClick={() => setPdfToast(false)}
+            className="pointer-events-auto mt-0.5 shrink-0 rounded-full p-1 text-emerald-100 hover:bg-white/10 transition-colors"
+            aria-label="Dismiss"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
       {/* Live Metrics */}
       <section aria-labelledby="live-metrics-heading" className="w-full mt-2">
         <CardSectionLabel id="live-metrics-heading">Live Metrics</CardSectionLabel>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           {METRIC_DEFS.map(({ key, label, unit, icon }) => {
             const value = metrics[key];
             return (
