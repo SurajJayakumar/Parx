@@ -9,6 +9,9 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { getServerEnv } from "@/lib/env.server";
 import { getAdminDb, hasAdminCredentials } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
+import { sendEmail } from "@/lib/email/sendEmail";
+import { reportReadyTemplate } from "@/lib/email/templates";
+import { logNotification } from "@/lib/notifications/log";
 
 // ---------------------------------------------------------------------------
 // Request schema
@@ -35,6 +38,7 @@ const GenerateSchema = z.object({
   uid: z.string().min(1),
   sessionId: z.string().min(1),
   patientName: z.string().min(1).optional(),
+  userEmail: z.string().email().optional(),
   events: z.array(EventSchema).min(0),
   metricSnapshots: z.array(MetricSnapshotSchema).optional(),
 });
@@ -868,7 +872,7 @@ export async function POST(req: NextRequest) {
     return fail("Request body must be valid JSON.");
   }
 
-  const { uid, sessionId, patientName = "Patient", events, metricSnapshots = [] } = input;
+  const { uid, sessionId, patientName = "Patient", userEmail, events, metricSnapshots = [] } = input;
 
   try {
     const stats = computeSummaryStats(events);
@@ -909,6 +913,32 @@ export async function POST(req: NextRequest) {
         disclaimer: structured.disclaimer,
         pdfUrl,
       });
+    }
+
+    // 5. Send report-ready email to the user (fire-and-forget — does not block the response)
+    if (userEmail) {
+      const { subject, html } = reportReadyTemplate({
+        userName: patientName,
+        reportPeriod: now.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
+        highlights: [
+          `Overall severity: ${stats.overallSeverity.charAt(0).toUpperCase() + stats.overallSeverity.slice(1)}`,
+          `Total events recorded: ${stats.total}`,
+          ...(stats.falls > 0 ? [`Falls detected: ${stats.falls}`] : []),
+          `Avg. PD probability: ${Math.round((stats.avgPd ?? 0) * 100)}%`,
+        ],
+        dashboardUrl: `${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/dashboard`,
+        reportUrl: `${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}${pdfUrl}`,
+      });
+
+      sendEmail({ to: userEmail, subject, html })
+        .then(() => {
+          logNotification({ uid, type: "email", sentTo: userEmail, subject, status: "sent" });
+        })
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("[generate] Failed to send report email:", msg);
+          logNotification({ uid, type: "email", sentTo: userEmail, subject, status: "failed", meta: { error: msg } });
+        });
     }
 
     return NextResponse.json({ ok: true });

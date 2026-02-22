@@ -13,9 +13,24 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID!;
 
 type Mode = "caregiver" | "clinician";
 
+interface ConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 // ─── System prompts ───────────────────────────────────────────────────────────
 
-function buildSystemPrompt(mode: Mode): string {
+function buildSystemPrompt(mode: Mode, reportContext?: string): string {
+  const reportSection = reportContext
+    ? `\n\nLATEST REPORT CONTEXT — use this data to ground your answers:
+${reportContext}
+
+REPORT RESPONSE RULES:
+- When summarizing the report (first message), give exactly 1 to 2 sentences covering: what the main event or finding is, when it happened, and 1 key metric. Then invite the user to ask follow-up questions.
+- For follow-up questions, answer in 2 to 3 short sentences using only information from the report context. If a question cannot be answered from the report, say so briefly.
+- Always stay grounded in the report data. Do not speculate beyond what the report contains.`
+    : "";
+
   const core = `\
 You are a proactive Parkinson's disease mobility monitoring AI assistant, delivered entirely through voice.
 
@@ -32,7 +47,7 @@ RESPONSE RULES (follow every rule, every time):
 3. Structure your thinking clearly but deliver it as natural spoken prose.
 4. If the user asks for a diagnosis, prognosis, or treatment decision, gently redirect them: acknowledge their concern, explain that this requires clinical evaluation, and encourage them to speak with their neurologist or movement disorder specialist.
 5. Weave the medical disclaimer naturally into your response as part of a sentence — do not bolt it onto the end as a formulaic tag. For example: "Keep in mind this isn't a medical diagnosis, but what you're describing sounds worth discussing with their neurologist."
-6. Be proactive: if the user describes a symptom or change, connect it to mobility monitoring context even if they didn't explicitly ask.`;
+6. Be proactive: if the user describes a symptom or change, connect it to mobility monitoring context even if they didn't explicitly ask.${reportSection}`;
 
   if (mode === "clinician") {
     return `${core}
@@ -118,8 +133,19 @@ async function transcribe(audioBlob: Blob): Promise<string> {
 
 // ─── Stage 2: Featherless LLM ─────────────────────────────────────────────────
 
-async function generateReply(transcript: string, mode: Mode): Promise<string> {
+async function generateReply(
+  transcript: string,
+  mode: Mode,
+  reportContext?: string,
+  history?: ConversationMessage[]
+): Promise<string> {
   const { signal, clear } = withTimeout(TIMEOUT_MS);
+
+  const messages: { role: string; content: string }[] = [
+    { role: "system", content: buildSystemPrompt(mode, reportContext) },
+    ...(history ?? []),
+    { role: "user", content: transcript },
+  ];
 
   try {
     const res = await fetch(`${FEATHERLESS_BASE_URL}/chat/completions`, {
@@ -130,10 +156,7 @@ async function generateReply(transcript: string, mode: Mode): Promise<string> {
       },
       body: JSON.stringify({
         model: FEATHERLESS_MODEL,
-        messages: [
-          { role: "system", content: buildSystemPrompt(mode) },
-          { role: "user", content: transcript },
-        ],
+        messages,
         max_tokens: 192,
         temperature: 0.55,
       }),
@@ -236,6 +259,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const fileField = formData.get("file");
   const modeField = formData.get("mode");
+  const reportContextField = formData.get("reportContext");
+  const historyField = formData.get("history");
 
   if (!fileField || !(fileField instanceof Blob)) {
     return NextResponse.json(
@@ -249,9 +274,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ? modeField
       : "caregiver";
 
+  const reportContext =
+    typeof reportContextField === "string" && reportContextField.trim()
+      ? reportContextField
+      : undefined;
+
+  let history: ConversationMessage[] | undefined;
+  if (typeof historyField === "string" && historyField.trim()) {
+    try {
+      history = JSON.parse(historyField) as ConversationMessage[];
+    } catch {
+      history = undefined;
+    }
+  }
+
   try {
     const transcript = await transcribe(fileField);
-    const reply = await generateReply(transcript, mode);
+    const reply = await generateReply(transcript, mode, reportContext, history);
     const audioBuffer = await synthesize(reply);
 
     return new NextResponse(audioBuffer, {
@@ -259,6 +298,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       headers: {
         "Content-Type": "audio/mpeg",
         "Cache-Control": "no-store",
+        "X-User-Transcript": encodeURIComponent(transcript),
+        "X-Assistant-Reply": encodeURIComponent(reply),
       },
     });
   } catch (err) {

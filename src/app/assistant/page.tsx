@@ -1,13 +1,38 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import AuthGate from "@/components/AuthGate";
+import { useAuth } from "@/lib/useAuth";
+import { db } from "@/lib/firebase/client";
+import {
+  collection,
+  getDocs,
+  orderBy,
+  query,
+  limit,
+} from "firebase/firestore";
 
 type CallStatus = "idle" | "listening" | "thinking" | "speaking" | "error";
 type UserMode = "caregiver" | "clinician";
 
+interface ConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface LatestReport {
+  title: string;
+  createdAt: string;
+  summary?: string;
+  observations?: string[];
+  interpretation?: string;
+  nextSteps?: string[];
+  safetyNotes?: string[];
+  highestSeverity?: string;
+}
+
 const STATUS_LABELS: Record<CallStatus, string> = {
-  idle: "Idle",
+  idle: "Tap to ask a follow-up",
   listening: "Listening…",
   thinking: "Thinking…",
   speaking: "Speaking…",
@@ -72,11 +97,36 @@ function SpeakingWave() {
   );
 }
 
-// sendUtterance is defined inside the component so it can close over state setters and refs.
+// ─── Build report context string for LLM ─────────────────────────────────────
+
+function buildReportContext(report: LatestReport): string {
+  const lines: string[] = [
+    `Report title: ${report.title}`,
+    `Generated: ${report.createdAt}`,
+  ];
+  if (report.highestSeverity) lines.push(`Overall severity: ${report.highestSeverity}`);
+  if (report.summary) lines.push(`Summary: ${report.summary}`);
+  if (report.observations?.length)
+    lines.push(`Observations: ${report.observations.join("; ")}`);
+  if (report.interpretation) lines.push(`Interpretation: ${report.interpretation}`);
+  if (report.nextSteps?.length)
+    lines.push(`Next steps: ${report.nextSteps.join("; ")}`);
+  if (report.safetyNotes?.length)
+    lines.push(`Safety notes: ${report.safetyNotes.join("; ")}`);
+  return lines.join("\n");
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
 
 export default function AssistantPage() {
   const [status, setStatus] = useState<CallStatus>("idle");
   const [mode, setMode] = useState<UserMode>("caregiver");
+  const [latestReport, setLatestReport] = useState<LatestReport | null>(null);
+  const [reportLoading, setReportLoading] = useState(true);
+  const [greetingDone, setGreetingDone] = useState(false);
+  const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]);
+
+  const { user } = useAuth();
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -86,9 +136,10 @@ export default function AssistantPage() {
   const submittingRef = useRef(false);
   const recordingStartRef = useRef<number>(0);
 
-  // Minimum utterance thresholds
   const MIN_DURATION_MS = 500;
   const MIN_BLOB_BYTES = 1000;
+
+  // ─── Fetch mic permission ────────────────────────────────────────────────────
 
   useEffect(() => {
     let mounted = true;
@@ -108,6 +159,58 @@ export default function AssistantPage() {
       revokeObjectUrl();
     };
   }, []);
+
+  // ─── Fetch latest report from Firestore ──────────────────────────────────────
+
+  useEffect(() => {
+    if (!user?.uid) return;
+
+    async function fetchLatestReport() {
+      try {
+        const snap = await getDocs(
+          query(
+            collection(db, "users", user!.uid, "reports"),
+            orderBy("createdAt", "desc"),
+            limit(1)
+          )
+        );
+        if (!snap.empty) {
+          const doc = snap.docs[0];
+          const data = doc.data();
+
+          const parseField = (val: unknown): string | undefined =>
+            typeof val === "string" ? val : undefined;
+          const parseArr = (val: unknown): string[] | undefined =>
+            Array.isArray(val) ? (val as string[]) : undefined;
+
+          const createdAt = data.createdAt?.toDate
+            ? data.createdAt.toDate().toLocaleString()
+            : typeof data.createdAt === "string"
+            ? data.createdAt
+            : "Unknown date";
+
+          setLatestReport({
+            title: parseField(data.title) ?? "Latest Report",
+            createdAt,
+            summary: parseField(data.summary),
+            observations: parseArr(data.observations),
+            interpretation: parseField(data.interpretation),
+            nextSteps: parseArr(data.nextSteps),
+            safetyNotes: parseArr(data.safetyNotes),
+            highestSeverity: parseField(data.highestSeverity),
+          });
+        }
+      } catch (err) {
+        console.error("[assistant] Failed to fetch latest report:", err);
+      } finally {
+        setReportLoading(false);
+      }
+    }
+
+    fetchLatestReport();
+  }, [user?.uid]);
+
+  // ─── Audio helpers ───────────────────────────────────────────────────────────
 
   function revokeObjectUrl() {
     if (objectUrlRef.current) {
@@ -129,6 +232,100 @@ export default function AssistantPage() {
     submittingRef.current = false;
   }
 
+  // ─── Play audio buffer ───────────────────────────────────────────────────────
+
+  function playAudioBuffer(
+    audioBlob: Blob,
+    onDone: () => void,
+    onFail: () => void
+  ) {
+    revokeObjectUrl();
+    const url = URL.createObjectURL(audioBlob);
+    objectUrlRef.current = url;
+
+    const audio = new Audio(url);
+    audioRef.current = audio;
+
+    audio.onended = () => {
+      submittingRef.current = false;
+      revokeObjectUrl();
+      onDone();
+    };
+
+    audio.onerror = () => {
+      submittingRef.current = false;
+      revokeObjectUrl();
+      onFail();
+    };
+
+    setStatus("speaking");
+    audio.play();
+  }
+
+  // ─── Auto-play greeting when report is loaded ────────────────────────────────
+
+  const playGreeting = useCallback(
+    async (report: LatestReport, currentMode: UserMode) => {
+      if (submittingRef.current) return;
+      submittingRef.current = true;
+      setStatus("thinking");
+
+      try {
+        const res = await fetch("/api/voice/greet", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reportContext: buildReportContext(report),
+            mode: currentMode,
+          }),
+        });
+
+        if (!res.ok || !res.headers.get("Content-Type")?.startsWith("audio/")) {
+          submittingRef.current = false;
+          setStatus("idle");
+          setGreetingDone(true);
+          return;
+        }
+
+        const greetingText = decodeURIComponent(
+          res.headers.get("X-Greeting-Text") ?? ""
+        );
+
+        const audioBlob = await res.blob();
+        playAudioBuffer(
+          audioBlob,
+          () => {
+            setStatus("idle");
+            setGreetingDone(true);
+            if (greetingText) {
+              setConversationHistory([{ role: "assistant", content: greetingText }]);
+            }
+          },
+          () => {
+            setStatus("idle");
+            setGreetingDone(true);
+          }
+        );
+      } catch {
+        submittingRef.current = false;
+        setStatus("idle");
+        setGreetingDone(true);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
+  useEffect(() => {
+    if (!reportLoading && latestReport && !greetingDone) {
+      playGreeting(latestReport, mode);
+    } else if (!reportLoading && !latestReport) {
+      setGreetingDone(true);
+    }
+  }, [reportLoading, latestReport, greetingDone, mode, playGreeting]);
+
+  // ─── Send user utterance ─────────────────────────────────────────────────────
+
   async function sendUtterance(blob: Blob): Promise<void> {
     if (submittingRef.current) return;
     submittingRef.current = true;
@@ -138,6 +335,18 @@ export default function AssistantPage() {
       const form = new FormData();
       form.append("file", blob, "utterance.webm");
       form.append("mode", mode);
+
+      if (latestReport) {
+        form.append("reportContext", buildReportContext(latestReport));
+      }
+
+      if (conversationHistory.length > 0) {
+        // Keep last 6 turns to stay within token limits
+        form.append(
+          "history",
+          JSON.stringify(conversationHistory.slice(-6))
+        );
+      }
 
       const res = await fetch("/api/voice/s2s", { method: "POST", body: form });
       const contentType = res.headers.get("Content-Type") ?? "";
@@ -150,28 +359,27 @@ export default function AssistantPage() {
         return;
       }
 
+      const transcriptHeader = decodeURIComponent(
+        res.headers.get("X-User-Transcript") ?? ""
+      );
+      const replyText = decodeURIComponent(
+        res.headers.get("X-Assistant-Reply") ?? ""
+      );
+
       const audioBlob = await res.blob();
-      revokeObjectUrl();
-      const url = URL.createObjectURL(audioBlob);
-      objectUrlRef.current = url;
-
-      const audio = new Audio(url);
-      audioRef.current = audio;
-
-      audio.onended = () => {
-        submittingRef.current = false;
-        setStatus("idle");
-        revokeObjectUrl();
-      };
-
-      audio.onerror = () => {
-        submittingRef.current = false;
-        setStatus("error");
-        revokeObjectUrl();
-      };
-
-      setStatus("speaking");
-      audio.play();
+      playAudioBuffer(
+        audioBlob,
+        () => {
+          setStatus("idle");
+          setConversationHistory((prev) => {
+            const next = [...prev];
+            if (transcriptHeader) next.push({ role: "user", content: transcriptHeader });
+            if (replyText) next.push({ role: "assistant", content: replyText });
+            return next;
+          });
+        },
+        () => setStatus("error")
+      );
     } catch {
       submittingRef.current = false;
       setStatus("error");
@@ -204,7 +412,6 @@ export default function AssistantPage() {
 
       const duration = Date.now() - recordingStartRef.current;
       if (duration < MIN_DURATION_MS || blob.size < MIN_BLOB_BYTES) {
-        // Too short or silent — silently reset without hitting the API
         setStatus("idle");
         return;
       }
@@ -237,11 +444,11 @@ export default function AssistantPage() {
       return;
     }
 
-    // idle or error → start
     startRecording();
   }
 
-  // Mic button appearance per status
+  // ─── UI helpers ──────────────────────────────────────────────────────────────
+
   const micBg: Record<CallStatus, string> = {
     idle: "bg-zinc-100 dark:bg-zinc-800 hover:scale-105 active:scale-95",
     listening: "bg-red-500 scale-110 shadow-red-300 dark:shadow-red-900",
@@ -260,9 +467,23 @@ export default function AssistantPage() {
 
   const showPingRing = status === "listening";
 
+  // Determine the idle label based on whether a report is loaded
+  const idleLabel =
+    status === "idle"
+      ? latestReport
+        ? "Tap to ask a follow-up"
+        : "Tap to speak"
+      : STATUS_LABELS[status];
+
+  const reportBadge = latestReport ? (
+    <div className="flex items-center gap-2 rounded-full bg-zinc-100 dark:bg-zinc-800 px-4 py-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
+      <span className="truncate max-w-[200px]">{latestReport.title}</span>
+    </div>
+  ) : null;
+
   return (
     <>
-      {/* Keyframe animations injected once */}
       <style>{`
         @keyframes thinking-bounce {
           0%, 100% { transform: translateY(0); opacity: 0.5; }
@@ -283,7 +504,13 @@ export default function AssistantPage() {
           </h1>
 
           {/* Center section */}
-          <div className="flex flex-col items-center gap-10">
+          <div className="flex flex-col items-center gap-8">
+
+            {/* Report badge */}
+            {!reportLoading && reportBadge}
+            {reportLoading && (
+              <div className="h-7 w-40 animate-pulse rounded-full bg-zinc-100 dark:bg-zinc-800" />
+            )}
 
             {/* Mic button */}
             <div className="relative flex items-center justify-center">
@@ -293,7 +520,7 @@ export default function AssistantPage() {
               <button
                 type="button"
                 onClick={handleMicClick}
-                disabled={status === "thinking"}
+                disabled={status === "thinking" || reportLoading}
                 aria-label={
                   status === "listening"
                     ? "Stop recording"
@@ -323,7 +550,7 @@ export default function AssistantPage() {
               </button>
             </div>
 
-            {/* Status area — fixed height so layout doesn't jump */}
+            {/* Status area */}
             <div className="flex h-8 items-center justify-center">
               {status === "thinking" && <ThinkingDots />}
               {status === "speaking" && <SpeakingWave />}
@@ -338,7 +565,7 @@ export default function AssistantPage() {
                     ].join(" ")}
                   />
                   <span className={["text-sm font-medium tracking-wide", STATUS_COLORS[status]].join(" ")}>
-                    {STATUS_LABELS[status]}
+                    {idleLabel}
                   </span>
                 </div>
               )}
