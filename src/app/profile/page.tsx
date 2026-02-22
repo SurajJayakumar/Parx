@@ -7,6 +7,7 @@ import { Card, CardSectionLabel } from "@/components/ui/Card";
 import { useAuth } from "@/lib/useAuth";
 import { signOutUser } from "@/lib/firebaseAuth";
 import { getUserProfile, saveUserProfile } from "@/lib/profile/profileStore";
+import { logNotificationClient } from "@/lib/notifications/clientLog";
 
 const DEBUG = process.env.NODE_ENV === "development";
 
@@ -14,7 +15,16 @@ const DEBUG = process.env.NODE_ENV === "development";
 // Demo helpers
 // ---------------------------------------------------------------------------
 
-type DemoResult = { ok: true; detail?: string } | { ok: false; error: string };
+type DemoSuccess = {
+  ok: true;
+  type: string;
+  subject: string;
+  sentTo: string;
+  severityScore?: number;
+  severityLabel?: string;
+};
+
+type DemoResult = DemoSuccess | { ok: false; error: string };
 
 async function demoFetch(
   url: string,
@@ -30,10 +40,14 @@ async function demoFetch(
     if (!res.ok || json.ok === false) {
       return { ok: false, error: json.error ?? `HTTP ${res.status}` };
     }
-    const detail = json.severity
-      ? `severity=${json.severity} score=${json.riskScore} sent=${json.sent}`
-      : undefined;
-    return { ok: true, detail };
+    return {
+      ok: true,
+      type: json.type ?? "email",
+      subject: json.subject ?? "",
+      sentTo: json.sentTo ?? "",
+      severityScore: json.severityScore,
+      severityLabel: json.severityLabel,
+    };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -77,6 +91,36 @@ export default function ProfilePage() {
           ? "/api/reports/notify"
           : "/api/alerts/weekly";
       result = await demoFetch(url, buildBody(profile.caregiverEmail, profile.patientName || "Demo Patient"));
+    }
+
+    // Log the notification to Firestore (client-side) regardless of outcome
+    if (result.ok) {
+      try {
+        await logNotificationClient({
+          type: result.type,
+          subject: result.subject,
+          sentTo: result.sentTo,
+          status: "sent",
+          severityScore: result.severityScore,
+          severityLabel: result.severityLabel,
+        });
+        router.push("/notifications");
+        return;
+      } catch {
+        // Log failure is non-fatal — fall through to show inline result
+      }
+    } else if ("error" in result) {
+      try {
+        await logNotificationClient({
+          type: key === "highRisk" ? "high_risk" : key === "reportReady" ? "report_ready" : "weekly_summary",
+          subject: "",
+          sentTo: profile?.caregiverEmail ?? "",
+          status: "failed",
+          meta: { error: result.error },
+        });
+      } catch {
+        // Log failure is non-fatal
+      }
     }
 
     setDemoResults((prev) => ({ ...prev, [key]: result }));
@@ -368,7 +412,7 @@ export default function ProfilePage() {
                         }`}
                       >
                         {result.ok
-                          ? `Success${result.detail ? ` — ${result.detail}` : ""}`
+                          ? `Sent to ${result.sentTo} — Logged ✅`
                           : `Error: ${result.error}`}
                       </p>
                     )}

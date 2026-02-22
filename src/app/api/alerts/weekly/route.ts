@@ -3,12 +3,11 @@ import { z } from "zod";
 
 import { weeklySummaryTemplate } from "@/lib/email/templates";
 import { sendEmail } from "@/lib/email/sendEmail";
-
-// ---------------------------------------------------------------------------
-// Request schema
-// ---------------------------------------------------------------------------
+import { logNotification } from "@/lib/notifications/log";
 
 const WeeklySchema = z.object({
+  /** Firebase Auth uid of the patient. Used to log the notification to Firestore. */
+  uid: z.string().min(1).optional(),
   caregiverEmail: z.string().email(),
   patientName: z.string().min(1),
   /** Human-readable week label, e.g. "Feb 17–23, 2026" */
@@ -67,6 +66,7 @@ export async function POST(req: NextRequest) {
   }
 
   const {
+    uid,
     caregiverEmail,
     patientName,
     weekRange,
@@ -90,13 +90,39 @@ export async function POST(req: NextRequest) {
   // 3. Send
   try {
     await sendEmail({ to: caregiverEmail, subject, html });
+
+    if (uid) {
+      logNotification({
+        uid,
+        type: "email",
+        sentTo: caregiverEmail,
+        subject,
+        status: "sent",
+        meta: { weekRange },
+      });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (uid) {
+      logNotification({
+        uid,
+        type: "email",
+        sentTo: caregiverEmail,
+        subject,
+        status: "failed",
+        meta: { weekRange, error: msg },
+      });
+    }
     return NextResponse.json(
       { ok: false, error: `Email could not be sent: ${msg}` },
       { status: 502 },
     );
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    type: "weekly_summary",
+    subject,
+    sentTo: caregiverEmail,
+  });
 }
