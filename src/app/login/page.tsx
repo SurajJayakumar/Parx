@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { signInWithGoogle, signInWithEmail } from "@/lib/firebaseAuth";
 import { useAuth } from "@/lib/useAuth";
@@ -96,11 +97,14 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="flex justify-center mb-8">
-          <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-900 dark:bg-zinc-50 shadow-lg">
-            <svg className="h-6 w-6 text-white dark:text-zinc-900" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-            </svg>
-          </span>
+          <Image
+            src="/parxx-logo.png"
+            alt="Parxx"
+            width={64}
+            height={64}
+            className="rounded-2xl shadow-lg"
+            priority
+          />
         </div>
 
         <h1 className="text-2xl font-bold text-center text-zinc-900 dark:text-zinc-50 mb-1">
