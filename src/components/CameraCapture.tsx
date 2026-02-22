@@ -484,6 +484,7 @@ export default function CameraCapture({
           uid: user.uid,
           sessionId: sessionIdRef.current,
           patientName: "Patient",
+          userEmail: user.email ?? undefined,
           events: reportEvents.map((e) => ({
             type: e.type,
             severity: e.severity,
