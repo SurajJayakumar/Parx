@@ -5,7 +5,7 @@ https://devpost.com/software/parkinsonai
 https://www.youtube.com/watch?v=bikkyhH4C1s&t=1s
 
 ## Getting Started
-First start up the backend server
+First start up the backend server cd into backend and 
 docker compose up
 
 Second, run the development server:
