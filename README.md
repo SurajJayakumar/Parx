@@ -1,8 +1,14 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+Axxess Hackathon 2026
+
+Video and Info available here: 
+https://devpost.com/software/parkinsonai
+https://www.youtube.com/watch?v=bikkyhH4C1s&t=1s
 
 ## Getting Started
+First start up the backend server
+docker compose up
 
-First, run the development server:
+Second, run the development server:
 
 ```bash
 npm run dev
